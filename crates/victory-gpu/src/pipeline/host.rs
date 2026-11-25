@@ -195,7 +195,7 @@ impl GraphicsState {
         };
         format!(
             "{:?} {} {:?} {:?}{bounds} {inputs:?} {} {} {:?} {} {:?}",
-            self.blend,
+            self.host_blend(),
             self.sample_mask,
             self.rasterizer,
             self.depth,

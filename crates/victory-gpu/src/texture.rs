@@ -975,6 +975,10 @@ impl Staging {
             return u32::MAX;
         }
         let tail = (self.layout.first_tail_mip as usize).min(mips.len());
+        // `VICTORY_LEVELS_MAX_SIDE=<texels>`: the levels with a longer side are left out as
+        // if the title did not hold them (no card memory, views start below them), down to
+        // the last level before the tail. Off by default.
+        let first = first.max(levels_cap(mips, self.layout.desc.block, tail));
         let there = |from: u64, to: u64| {
             to > from && to <= limit && committed(self.memory.wrapping_add(from as usize), (to - from) as usize)
         };
@@ -1651,5 +1655,58 @@ mod title_memory_tests {
                 assert_ne!(VirtualFree(base.cast(), 0, MEM_RELEASE), 0);
             }
         }
+    }
+}
+
+/// The first level `VICTORY_LEVELS_MAX_SIDE` lets a texture hold: the first whose longer side,
+/// in texels (`block` texels an element), is within the cap, and no later than the last
+/// level before the tail (level `tail`'s predecessor), so that every texture keeps one.
+/// 0 with the cap unset.
+fn levels_cap(mips: &[victory_formats::texture::Mip], block: u32, tail: usize) -> u64 {
+    static CAP: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let cap = *CAP.get_or_init(|| {
+        std::env::var("VICTORY_LEVELS_MAX_SIDE").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)
+    });
+    first_level_within(mips, block, tail, cap)
+}
+
+fn first_level_within(mips: &[victory_formats::texture::Mip], block: u32, tail: usize, cap: u32) -> u64 {
+    if cap == 0 {
+        return 0;
+    }
+    let last = tail.min(mips.len()).saturating_sub(1);
+    let within = |m: &victory_formats::texture::Mip| m.width.max(m.height).saturating_mul(block.max(1)) <= cap;
+    mips.iter().take(last).position(within).unwrap_or(last) as u64
+}
+
+#[cfg(test)]
+mod levels_cap_tests {
+    use super::first_level_within;
+    use victory_formats::texture::Mip;
+
+    fn chain(side: u32, levels: usize) -> Vec<Mip> {
+        (0..levels)
+            .map(|l| {
+                let s = (side >> l).max(1);
+                Mip { width: s, height: s, depth: 1, pitch: s, rows: s, depth_pitch: 1, offset: 0, tail: None }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_cap_names_the_first_level_within_it_and_keeps_one() {
+        // 2048 texels a side, in elements of 4: levels 512, 256, 128, ... elements.
+        let mips = chain(512, 10);
+        // unset: every level
+        assert_eq!(first_level_within(&mips, 4, 7, 0), 0);
+        // 2048 fits a cap of 2048; a cap of 1024 starts at level 1, of 512 at level 2
+        assert_eq!(first_level_within(&mips, 4, 7, 2048), 0);
+        assert_eq!(first_level_within(&mips, 4, 7, 1024), 1);
+        assert_eq!(first_level_within(&mips, 4, 7, 512), 2);
+        // a cap below every level before the tail keeps the last of them
+        assert_eq!(first_level_within(&mips, 4, 7, 1), 6);
+        // a texture that is all tail, or has one level, keeps level 0
+        assert_eq!(first_level_within(&mips, 4, 0, 16), 0);
+        assert_eq!(first_level_within(&chain(512, 1), 4, 1, 16), 0);
     }
 }

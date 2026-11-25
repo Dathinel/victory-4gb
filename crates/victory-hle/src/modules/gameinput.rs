@@ -1130,6 +1130,9 @@ mod host {
     #[derive(Default)]
     pub(super) struct Host {
         empty_until: [Option<Instant>; PADS],
+        /// Whether the last look at the keys had focus: the first one after
+        /// focus comes back takes no key pressed while it was away.
+        focused: bool,
     }
 
     impl Source for Host {
@@ -1166,7 +1169,11 @@ mod host {
             let mut down = scripted();
             #[cfg(not(feature = "diagnostics"))]
             let mut down = Vec::new();
-            if focused() {
+            let focused = focused();
+            // A press from before the window had focus is not the title's: the first look
+            // after focus returns reads the low bits only to clear them.
+            let fresh = focused && !std::mem::replace(&mut self.focused, focused);
+            if focused {
                 // Left/right modifier keys only, as devices report them; no
                 // mouse buttons (below 0x08).
                 let held: Vec<u8> = (0x08..=0xFE_u8)
@@ -1176,7 +1183,7 @@ mod host {
                     // SAFETY: plain queries.
                     .filter(|&vk| {
                         let state = unsafe { GetAsyncKeyState(i32::from(vk)) };
-                        state < 0 || state & 1 != 0
+                        state < 0 || (!fresh && state & 1 != 0)
                     })
                     .collect();
                 down.extend(held);

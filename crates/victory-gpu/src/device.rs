@@ -388,11 +388,21 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
         let first = description
             .as_ref()
             .and_then(|w| words(w[0] as usize));
+        // What every later word that is an address points at, for the first
+        // calls only: the description's parts are not known either.
+        let parts: Vec<(usize, Vec<u64>)> = description
+            .iter()
+            .filter(|_| calls <= 4)
+            .flat_map(|w| w.iter().copied().enumerate().skip(1).take(11))
+            .filter(|&(_, at)| at > 0x1_0000)
+            .filter_map(|(i, at)| Some((i, words(at as usize)?)))
+            .collect();
         tracing::warn!(
             slot = format_args!("{:#x}", SLOT),
             calls,
             description = format_args!("{description:x?}"),
             first_points_at = format_args!("{first:x?}"),
+            parts = format_args!("{parts:x?}"),
             "a pipeline creation method that is not implemented: the title goes without this pipeline"
         );
     }

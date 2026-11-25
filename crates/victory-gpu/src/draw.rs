@@ -2901,6 +2901,40 @@ impl State {
         out
     }
 
+    /// Diagnostics: a draw whose first viewport reaches past one of its
+    /// targets (the debug layer's message 1378 names no draw), once for each
+    /// pipeline and the first sixteen of them.
+    #[cfg(feature = "diagnostics")]
+    fn note_wide_viewport(&self) {
+        static SEEN: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+        let Some(v) = self.viewports.first() else {
+            return;
+        };
+        let size = |r: &usize| {
+            // SAFETY: a live host resource; its description is read.
+            crate::resource::host_resource(*r as This).map(|t| unsafe { t.GetDesc() }).map(|d| (d.Width, d.Height))
+        };
+        let colour: Vec<_> = self.targets.iter().filter_map(size).collect();
+        let depth = (self.depth != 0).then(|| size(&self.depth)).flatten();
+        let (right, bottom) = ((v.TopLeftX + v.Width) as u64, (v.TopLeftY + v.Height) as u64);
+        if !colour.iter().chain(&depth).any(|&(w, h)| w < right || u64::from(h) < bottom) {
+            return;
+        }
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        if seen.len() >= 16 || seen.contains(&self.pipeline) {
+            return;
+        }
+        seen.push(self.pipeline);
+        tracing::warn!(
+            viewport = format_args!("{}x{} at {},{}", v.Width, v.Height, v.TopLeftX, v.TopLeftY),
+            colour = format_args!("{colour:?}"),
+            depth = format_args!("{depth:?}"),
+            scissor = format_args!("{:?}", self.scissors.first()),
+            op = %self.op_text("draw".to_owned(), false),
+            "a draw whose viewport reaches past a target (mip 0 sizes)"
+        );
+    }
+
     pub(crate) fn draw(
         &mut self,
         list: &HostList,
@@ -2915,6 +2949,8 @@ impl State {
         }
         #[cfg(feature = "diagnostics")]
         self.trace("draw", vertices, first);
+        #[cfg(feature = "diagnostics")]
+        self.note_wide_viewport();
         let ready = self.prepare(list, false);
         // A pipeline with the rectangle geometry stage draws the title's
         // vertices as they are; any other gets its rectangles expanded.

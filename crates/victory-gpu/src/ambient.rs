@@ -536,10 +536,13 @@ void raise(uint3 at : SV_DispatchThreadID) {
 const CELLS: u64 = 64 * 36;
 const CELL_BYTES: u64 = (2 * CELLS + 1) * 16;
 const POINT_BYTES: u64 = 160 * 90 * 48;
-/// Views of what [`fill`] writes, a ring.
-/// shortcut: a view must last until its list has run; with a few fills a
-/// frame the ring is far from coming round.
-const FILL_VIEWS: u32 = 64;
+/// Views of what [`fill`] and the march clamp write, a ring.
+/// shortcut: a view must last until its list has run, and nothing here
+/// waits for that: the ring is only long. The clamp takes up to 8 a frame,
+/// so 4,096 come round after about 500 frames, where 64 came round after 8;
+/// upgrade to slots retired by the list's fence if lists are ever held that
+/// long (found by Codex's review of pull request #15).
+const FILL_VIEWS: u32 = 4096;
 
 struct Pass {
     root: ID3D12RootSignature,

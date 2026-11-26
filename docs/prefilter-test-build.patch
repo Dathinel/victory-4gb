@@ -1,0 +1,12 @@
+diff --git a/crates/victory-shader/src/emit/mod.rs b/crates/victory-shader/src/emit/mod.rs
+index edae14a..ded1526 100644
+--- a/crates/victory-shader/src/emit/mod.rs
++++ b/crates/victory-shader/src/emit/mod.rs
+@@ -1407,6 +1407,7 @@ mod tests {
+         };
+         let cs = super::HostShader {
+             stage: super::HwStage::Cs,
++            dispatch_contract: super::DispatchContract::None,
+             dxil,
+             user_data: l.user_data,
+             samplers: Vec::new(),

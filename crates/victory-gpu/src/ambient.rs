@@ -776,6 +776,11 @@ pub(crate) fn fill(list: &HostList, image: This, first_only: bool) -> bool {
     }
     uav_barrier(l);
     crate::list::ensure_state(list, image, READ);
+    #[cfg(feature = "diagnostics")]
+    {
+        crate::capture::note_target(image);
+        list.note_op(|| format!("ambient SkinFill target={image:p} layers={layers} first_only={first_only}"));
+    }
     static TOLD: Mutex<u32> = Mutex::new(0);
     let mut said = TOLD.lock().unwrap_or_else(|e| e.into_inner());
     if *said < 4 {

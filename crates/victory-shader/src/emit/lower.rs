@@ -570,6 +570,22 @@ fn lane_uniform(p: &Program, st: &Structured, all: &[bool], ordered_lds: bool) -
             if st.guards[b][i].is_some() {
                 continue; // lanes outside EXEC keep another value
             }
+            if name == "v_swap_b32" {
+                if let Fields::Valu(v) = &inst.fields
+                    && v.dpp.is_none() && v.sdwa.is_none()
+                    && let (Some(Operand::Vector { reg: dst, .. }), Some(&Operand::Vector { reg: src, .. })) =
+                        (v.dst, v.src.first())
+                {
+                    for (out, input) in [(dst, src), (src, dst)] {
+                        if inst.read(Reg::V(input)).is_some_and(|x| same.contains(&x))
+                            && let Some(value) = inst.write(Reg::V(out))
+                        {
+                            same.insert(value);
+                        }
+                    }
+                }
+                continue;
+            }
             let ops: Vec<Operand> = match &inst.fields {
                 Fields::Valu(v)
                     if v.dpp.is_none()
@@ -13020,6 +13036,47 @@ mod tests {
     use crate::{io, ir, resource, structure};
 
     const S_ENDPGM: u32 = 0xBF81_0000;
+
+    #[test]
+    fn swap_tracks_uniformity_for_each_result() {
+        use super::{Reg, all_lane_blocks, lane_uniform};
+
+        // A register number of 256 names v0, the varying thread ID.
+        // Inline constants start at 128 (0); 170 and 145 encode 42 and 17.
+        let mov = |reg: u8, input| 0x7E00_0200 | (u32::from(reg) << 17) | input;
+        let check = |dst: u8, src: u8, dst_input, src_input, guarded| {
+            let mut words = vec![mov(dst, dst_input)];
+            if dst != src {
+                words.push(mov(src, src_input));
+            }
+            if guarded {
+                words.push(0x7DA8_00A0); // v_cmpx_gt_u32 exec, 32, v0
+            }
+            words.push(0x7E00_CB00 | (u32::from(dst) << 17) | u32::from(src));
+            words.push(S_ENDPGM);
+            let code: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+            let p = ir::build(&code, true, 8).unwrap();
+            let st = structure::structure(&p).unwrap();
+            let same = lane_uniform(&p, &st, &all_lane_blocks(&st).unwrap(), false);
+            let index = p.blocks[0].insts.iter().position(|i| i.name() == "v_swap_b32").unwrap();
+            assert_eq!(st.guards[0][index].is_some(), guarded);
+            let swap = &p.blocks[0].insts[index];
+            for (reg, input) in [(dst, src_input), (src, dst_input)] {
+                let uniform = same.contains(&swap.write(Reg::V(reg)).unwrap());
+                assert_eq!(uniform, !guarded && input != 256,
+                    "swap v{dst}, v{src}, inputs {dst_input}/{src_input}, guarded {guarded}, result v{reg}");
+            }
+        };
+        for (dst, src) in [(5, 6), (6, 5)] {
+            for (a, b) in [(256, 170), (170, 256), (170, 145), (256, 256)] {
+                check(dst, src, a, b, false);
+            }
+        }
+        check(5, 5, 170, 170, false);
+        check(5, 5, 256, 256, false);
+        // Half the wave keeps the old values: both registers now vary.
+        check(5, 6, 170, 145, true);
+    }
 
     #[test]
     fn packed_pixel_inputs_find_their_second_row() {

@@ -984,5 +984,41 @@ fn scatter_selects_the_highest_active_sender_per_half() {
                 assert_eq!(got, want, "threads={threads} active={active} collide={collide} twice={twice}");
             }
         }
+/// v5 starts as the thread ID and v6 as 42. After their swap, the first lane
+/// of v6 is thread zero for the entire guest wave. Adding lane 63 makes every
+/// expected store nonzero and keeps the full-wave exchange live.
+#[test]
+#[ignore = "requires wave32-capable D3D12 hardware"]
+fn swap_first_lane_broadcast_reaches_both_host_waves() {
+    let words = [
+        0x7E0A_0300, // v_mov_b32 v5, v0
+        0x7E0C_02AA, // v_mov_b32 v6, 42
+        0x7E0A_CB06, // v_swap_b32 v5, v6
+        0x7E1C_0506, // v_readfirstlane_b32 s14, v6
+        0xD760_000F, 0x0001_7F00, // v_readlane_b32 s15, v0, 63
+        0x7E0E_020F, // v_mov_b32 v7, s15
+        0x4A0E_0E0E, // v_add_nc_u32 v7, s14, v7
+        0x3414_0082, // v_lshlrev_b32 v10, 2, v0
+        0xE070_1000, 0x8002_070A, // buffer_store_dword v7, v10, s[8:11], 0 offen
+    ];
+    let native = native(&words);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("build IR");
+    let shader = lowered(&native, &p, &HashSet::new()).expect("lower for wave32");
+    if let Ok(mut validator) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        validator.validate(&mut shader.dxil.clone()).expect("validate DXIL");
+    }
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let host = Host::new(false).expect("hardware adapter");
+    let (root, pso) = host.compute_pipeline(&shader).expect("wave32 compute pipeline");
+    let data = vec![0; shader.user_data_dwords().max(1) as usize];
+    let out = host.dispatch(&root, &pso, &Dispatch {
+        roots: vec![(0, Root::Constants(data))],
+        views: &[View::RawUav(64)],
+        samplers: &[],
+        groups: [1, 1, 1],
+    }).expect("hardware readback");
+    assert_eq!(out[0].len(), 64);
+    for (thread, &word) in out[0].iter().enumerate() {
+        assert_eq!(word, 63, "guest thread {thread}: first lane of swapped ID plus lane 63");
     }
 }

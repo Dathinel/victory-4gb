@@ -15,8 +15,8 @@ not affiliated with or endorsed by the game's developer or publisher.
 On the machine above, branch `coolfox-4gb`, one 40-minute session played with an Xbox controller:
 from the first scene through the first mission and its chase to the boat mission in the open world,
 with no crash and no device loss. Median 4.0 fps over the session (423 one-second
-readings); 4.4 to 4.5 fps in the open-world boat scene and 5.2 to 5.5 fps in the first room in
-separate runs.
+readings); in separate runs since, 5.2 to 7.0 fps in the open-world boat scene with the title's own
+upscaler at half scale (4.4 to 4.5 without), and 5.2 to 5.5 fps in the first room.
 
 - **Good:** daylight outdoors. Sky, water, vegetation, vehicles, characters and faces in the boat
   mission and its cutscene, the minimap and the interface.
@@ -63,6 +63,7 @@ The set this card runs best with so far:
 VICTORY_LEVELS_ON_DEMAND=1 VICTORY_TEXTURE_NO_WAIT=1 VICTORY_AMBIENT=0.8 VICTORY_AMBIENT_AIR=1.5
 VICTORY_RELAY_COPY=1 VICTORY_CARD_REHASH_RUNS=1 VICTORY_JOIN_COPIES=1 VICTORY_INDIRECT_WINDOW=1
 VICTORY_INDIRECT_BATCH=2 VICTORY_NAN_SCRUB=1 VICTORY_TEXTURE_DROP_MIPS=1 VICTORY_BAKE_SOURCES=full
+VICTORY_UPSCALER=6 VICTORY_RENDER_SCALE=0.5
 ```
 
 184 to 192 ms a frame (98 to 111 ms on the GPU, 65 to 67 ms preparing), 5.2 to 5.5 fps, about
@@ -129,8 +130,19 @@ Switches added or ported here (all off unless the script sets them):
 | `VICTORY_FULLSCREEN=1\|borderless` | a framed window as large as the work area, or a frameless one over the display | here |
 | `VICTORY_TEXTURE_BUDGET_MB` floor | the texture floor follows the budget on small cards | here (fork pull request #1122) |
 
-On `main`, half render scale is worth about 13 % (165-190 ms to 145-157 ms). On `coolfox-4gb` it is
-worth nothing and costs background detail: leave it at the title's own there.
+On `main`, half render scale is worth about 13 % (165-190 ms to 145-157 ms).
+
+On `coolfox-4gb` with the Series S profile the render scale is the upscaler's, and which upscaler
+matters. Same boat scene, one run each, against 4.4 to 4.5 fps (140 to 147 ms on the GPU):
+
+- `VICTORY_RENDER_SCALE=0.5` alone: nothing (the Series S profile picks FidelityFX, which that
+  switch does not reach).
+- `VICTORY_FFX_SCALE=0.5`, and `VICTORY_OUTPUT=1280x720`: the title divides by zero 49 to 90 s in
+  (its FSR4 tables are for one resolution only). Do not use them on Series S.
+- **`VICTORY_UPSCALER=6 VICTORY_RENDER_SCALE=0.5`** (the title's own upscaler at half scale):
+  **5.2 to 7.0 fps**, 63 to 118 ms on the GPU. The picture is softer, the far background most.
+- Skipping the seven compute programs fork issue #1278 names: nothing in this scene (they do not
+  run in it). `VICTORY_TEXTURE_BUDGET_MB=1024`: within the noise.
 
 ## Measured and ruled out on this card
 

@@ -56,15 +56,22 @@ pub extern "system" fn UnregisterAppStateChangeNotification(registration: usize)
     routines().retain(|&(id, ..)| id != registration);
 }
 
-/// `VICTORY_FULLSCREEN=1`: a top-level title window loses its frame and covers the
-/// primary display (the swap chain stretches the picture to it).
+/// `VICTORY_FULLSCREEN=1`: a top-level title window opens maximized and keeps its frame, so
+/// the frame rate in its title bar stays in view. `VICTORY_FULLSCREEN=borderless`: without a
+/// frame, over the whole primary display. (The swap chain stretches the picture to either.)
 fn full_screen(parent: HWND, style: u32, x: i32, y: i32, width: i32, height: i32) -> (u32, i32, i32, i32, i32) {
-    if !parent.is_null() || std::env::var_os("VICTORY_FULLSCREEN").is_none_or(|v| v != "1") {
+    if !parent.is_null() {
         return (style, x, y, width, height);
     }
-    // SAFETY: two metrics of the primary display.
-    let (w, h) = unsafe { (wm::GetSystemMetrics(wm::SM_CXSCREEN), wm::GetSystemMetrics(wm::SM_CYSCREEN)) };
-    (wm::WS_POPUP | wm::WS_VISIBLE, 0, 0, w, h)
+    match std::env::var("VICTORY_FULLSCREEN").ok().as_deref().map(str::trim) {
+        Some("1") => (style | wm::WS_MAXIMIZE | wm::WS_VISIBLE, x, y, width, height),
+        Some("borderless") => {
+            // SAFETY: two metrics of the primary display.
+            let (w, h) = unsafe { (wm::GetSystemMetrics(wm::SM_CXSCREEN), wm::GetSystemMetrics(wm::SM_CYSCREEN)) };
+            (wm::WS_POPUP | wm::WS_VISIBLE, 0, 0, w, h)
+        }
+        _ => (style, x, y, width, height),
+    }
 }
 
 /// The window procedure a title window had before ours.

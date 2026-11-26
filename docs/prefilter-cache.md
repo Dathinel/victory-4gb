@@ -11,3 +11,20 @@ Run cargo test --locked -p victory-gpu --lib shader_cache::tests first with VICT
 After resolving the cache as above, apply prefilter-test-build.patch. The scalar-load test on main constructs an unrestricted synthetic compute shader. Its initializer requires the new dispatch_contract field; without it the shader test binary fails with E0063. The one-line patch affects only that test.
 
 All seven synthetic bitcode::group_sync::tests passed, including the prefilter gate and barrier-order checks. The scalar_buffer_loads_read_the_same_dwords_one_call_or_four test ran on WARP in separate processes with VICTORY_SHADER_OPT unset and set to 64. All six offset pairs per run produced the expected values. Capture-dependent translation and hardware tile tests were not run.
+
+## CLI smoke test
+
+The diagnostics build at this integration was exercised through the public CLI. The fixture below is a generated 64-thread compute program with a single end-program instruction, no resources, no capture and no game data. It checks the ordinary translation path when the opt-in prefilter is enabled. It does not match the prefilter itself.
+
+In PowerShell, from the checkout, use an isolated target directory as usual:
+
+```powershell
+cargo build --locked -p victory --features diagnostics
+$fixture = Join-Path $env:TEMP ([guid]::NewGuid().ToString() + '.dxbc')
+[IO.File]::WriteAllBytes($fixture, [Convert]::FromBase64String('RFhCQwAAAAAAAAAAAAAAAAAAAAABAAAArQAAAAEAAAAkAAAARFhJTIEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABYREFUAQAAACQAAAANAAAAMAAAAFEAAABYQkNIAwAAADkAAAAAAAAABAEAAAAAAAB4nHMLDvZlZGRg+MIAAWxQ+v2+tfdIwVBtcIBLPANKf4DSLOgKyASkmOPAwMDACMUMDI37AU3RMig='))
+$env:VICTORY_HOST_MAX_WAVE = '32'
+$env:VICTORY_SPLIT_PREFILTER = '1'
+cargo run --locked -p victory --features diagnostics -- translate $fixture --validate --list --jobs 1
+```
+
+With the switch unset and again at 1, the Windows SDK 10.0.26100 validator accepted one of one compute programs (#b3c32985f3206977). Pipeline creation and dispatch were not requested.

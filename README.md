@@ -1,5 +1,7 @@
 # VIctory on a 4 GB laptop card
 
+In the Series S boat sequence, the 4 GB RTX 3050 Laptop rendered the characters, shoreline and sunlight on the water. Two captured world views read 222.3 and 227.9 ms/frame (4 FPS on the window counter). Earlier shots in the same run had white transitions and underlit faces. [Capture timeline and settings](https://github.com/Dathinel/victory-4gb/issues/1#issuecomment-7204395814).
+
 Two lines of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer that runs an Xbox
 Series title natively on Windows from files the user supplies, brought to one machine with little
 video memory and measured there:

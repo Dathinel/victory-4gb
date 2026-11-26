@@ -56,6 +56,9 @@ fn build() -> [u8; 32] {
         }
         let mut bytes = env!("VICTORY_TRANSLATOR").as_bytes().to_vec();
         bytes.extend_from_slice(&limit.to_le_bytes());
+        if victory_shader::emit::bvh_no_hit() {
+            bytes.extend_from_slice(b"VICTORY_BVH_NO_HIT=1");
+        }
         // Which group barriers wait is part of the translation too.
         bytes.push(victory_shader::emit::group_sync());
         // So are the switches that pick the form of a wave64 program:
@@ -387,6 +390,47 @@ mod tests {
                 byte_offset: 32,
                 shift: 5,
             }],
+        }
+    }
+
+    // build() caches process settings. Repeat launches against one cache directory.
+    #[test]
+    fn cached_node_tests_follow_the_effective_bvh_mode() {
+        const CHILD_DIR: &str = "VICTORY_TEST_NODE_CACHE_DIR";
+        if let Some(dir) = std::env::var_os(CHILD_DIR) {
+            let cache = Cache::open(std::path::Path::new(&dir)).unwrap();
+            let mut expected = shader();
+            if std::env::var("VICTORY_BVH_NO_HIT").as_deref() == Ok("1")
+                && std::env::var("VICTORY_BVH_BUILDER").as_deref() != Ok("1")
+            {
+                expected.dxil.push(1);
+            }
+            let misses = AtomicU64::new(0);
+            let actual = cached(&cache, &build(), b"synthetic node test", |_| {
+                misses.fetch_add(1, Ordering::Relaxed);
+                Ok(expected.clone())
+            });
+            assert_eq!(actual, Ok(expected));
+            println!("node-cache-misses={}", misses.load(Ordering::Relaxed));
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let exe = std::env::current_exe().unwrap();
+        for (no_hit, builder, misses) in [("0", "0", 1), ("1", "0", 1), ("1", "1", 0), ("0", "1", 0), ("1", "0", 0)] {
+            let output = std::process::Command::new(&exe)
+                .arg("shader_cache::tests::cached_node_tests_follow_the_effective_bvh_mode")
+                .args(["--exact", "--nocapture"])
+                .env(CHILD_DIR, dir.path())
+                .env("VICTORY_BVH_NO_HIT", no_hit)
+                .env("VICTORY_BVH_BUILDER", builder)
+                .env("VICTORY_WARP", "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(),
+                "no_hit={no_hit}, builder={builder}: {}", String::from_utf8_lossy(&output.stderr));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains(&format!("node-cache-misses={misses}")), "{stdout}");
         }
     }
 

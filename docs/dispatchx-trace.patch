@@ -1,0 +1,37 @@
+diff --git a/crates/victory-gpu/src/draw.rs b/crates/victory-gpu/src/draw.rs
+index 075c3b1..f8451eb 100644
+--- a/crates/victory-gpu/src/draw.rs
++++ b/crates/victory-gpu/src/draw.rs
+@@ -2299,6 +2299,8 @@ impl State {
+         list.note_op(|| self.op_text(format!("dispatch {gx}x{gy}x{gz}"), true));
+         // SAFETY: an open list with everything set.
+         unsafe { list.list.Dispatch(gx, gy, gz) };
++        #[cfg(feature = "diagnostics")]
++        note_thread_dispatch(&p.name, flags, [x, y, z], t.threads, [gx, gy, gz], partial);
+         DISPATCHED.fetch_add(1, Ordering::Relaxed);
+     }
+ 
+@@ -3817,6 +3819,23 @@ pub(crate) fn depth_bounds(list: &HostList, min: f32, max: f32) {
+     }
+ }
+ 
++#[cfg(feature = "diagnostics")]
++fn note_thread_dispatch(
++    pipeline: &str,
++    flags: u32,
++    threads: [u32; 3],
++    group_size: [u32; 3],
++    groups: [u32; 3],
++    partial_limits: [u32; 3],
++) {
++    if flags & DISPATCH_USE_THREAD_DIMENSIONS != 0 {
++        tracing::debug!(
++            target: "victory_gpu::dispatch_x", pipeline, flags = format_args!("{flags:#x}"),
++            ?threads, ?group_size, ?groups, ?partial_limits, "recorded DispatchX by thread count"
++        );
++    }
++}
++
+ /// AMD GFX10 / console `COMPUTE_DISPATCH_INITIATOR` bit 5:
+ /// `USE_THREAD_DIMENSIONS` (`DispatchX` arguments are raw thread counts rather
+ /// than thread-group counts, with trailing lanes masked off in initial `EXEC`).

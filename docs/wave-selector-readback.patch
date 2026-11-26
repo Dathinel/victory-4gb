@@ -1,0 +1,39 @@
+diff --git a/crates/victory-shader/src/emit/wave64_tests.rs b/crates/victory-shader/src/emit/wave64_tests.rs
+index 75eac6e..e441b0d 100644
+--- a/crates/victory-shader/src/emit/wave64_tests.rs
++++ b/crates/victory-shader/src/emit/wave64_tests.rs
+@@ -853,3 +853,33 @@ fn a_branch_that_writes_lds_two_different_values_keeps_64_lanes() {
+     // a second value after the read: what the flag ends up holding depends on what was read
+     assert_eq!(flag_wave(&flag_program(Some(2))), Some(64));
+ }
++
++#[test]
++fn synthetic_or_selector_readback() {
++    super::set_host_max_wave(32);
++    let bytes = std::fs::read(std::env::var_os("CODEX_OR_FIXTURE").unwrap()).unwrap();
++    let selected = super::wave_wide_only("7a20f4c11ee2d343");
++    let shader = super::with_wave_wide(selected, || super::translate(&bytes)).unwrap();
++    let warp = std::env::var_os("CODEX_OR_WARP").is_some();
++    let host = Host::new(warp).unwrap();
++    let (root, pso) = host.compute_pipeline(&shader).unwrap();
++    let mut errors = 0;
++    for below in [1u32, 10, 31, 32, 33, 40, 63, 64] {
++        let count = below.div_ceil(2);
++        let expected = ((1u64 << count) - 1) as u32;
++        let mut user_data = vec![0; shader.user_data_dwords().max(1) as usize];
++        for u in &shader.user_data {
++            if (u.root, u.slot, u.dword) == (RootType::Constants, 0, 0) {
++                user_data[u.index as usize] = below;
++            }
++        }
++        let result = host.dispatch(&root, &pso, &Dispatch {
++            roots: vec![(0, Root::Constants(user_data))], views: &[View::RawUav(1)],
++            samplers: &[], groups: [1, 1, 1],
++        }).unwrap()[0][0];
++        errors += u32::from(result != expected);
++        eprintln!("threshold={below} got={result:08x} expected={expected:08x}");
++    }
++    eprintln!("selected={selected} warp={warp} mismatches={errors}/8");
++    assert_eq!(errors, 0);
++}
+\ No newline at end of file

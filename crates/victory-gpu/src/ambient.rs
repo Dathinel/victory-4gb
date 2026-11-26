@@ -134,6 +134,11 @@ pub(crate) fn light_slots() -> &'static [u32] {
 }
 
 /// `VICTORY_SKIN_FILL=1`: skin's probe images get the stand-in's light.
+/// Do not set it on the Series S profile of title 1.0.2.1: a target dump
+/// there (run serie-74) shows the two slots it fills hold shadow masks
+/// (`CS_GenerateShadowMasks`) and the light loop's masks
+/// (`CS_PrescalarizeLightLoop`), not probes. Kept for the profile it was
+/// written on (Linox-IDK/LNX-victory `0f9a071`).
 pub(crate) fn skin_fill() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_SKIN_FILL").is_some_and(|v| v != "0"))

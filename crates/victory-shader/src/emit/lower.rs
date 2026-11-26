@@ -7921,6 +7921,22 @@ impl<'a> Lower<'a> {
         }
         let mut guard = self.guard(b, i)?;
         if let Some(d) = v.dpp {
+            if self.s.pixel && matches!(d, Dpp::Lanes { .. }) {
+                // A missing local guard can also mean that a divergent branch
+                // already excluded lanes. Only use helpers in a straight-line
+                // entry block after EXEC has explicitly entered whole-quad mode.
+                let exec = Reg::S(EXEC);
+                let last_mask = self.x.p.blocks[b].insts[..i].iter().rev().find(|op| {
+                    op.write(exec).is_some()
+                        || (self.x.p.wave64 && op.write(Reg::S(EXEC + 1)).is_some())
+                });
+                let wqm = if self.x.p.wave64 { "s_wqm_b64" } else { "s_wqm_b32" };
+                if guard.is_some() || b != 0 || !self.x.p.blocks[b].preds.is_empty()
+                    || !last_mask.is_some_and(|op| op.name() == wqm && op.write(exec).is_some())
+                {
+                    return Err("a pixel DPP8 outside known whole-quad execution");
+                }
+            }
             let (x, enable) = self.dpp(inst, d)?;
             guard = match (guard, enable) {
                 (Some(g), Some(e)) => Some(self.s.m.bin(self.cur, Bin::And, g, e)),
@@ -7944,10 +7960,24 @@ impl<'a> Lower<'a> {
         };
         let x = self.i32_of(inst.read(Reg::V(reg)).ok_or("a DPP operand")?)?;
         // Quad permutations and DPP8 stay in groups the pixel layout shares.
-        let quad = matches!(dpp, Dpp::Row { ctrl: 0..=0xFF, .. });
+        let quad = match dpp {
+            Dpp::Row { ctrl, .. } => ctrl <= 0xff,
+            // Pixel waves may contain just one quad. Each half of the
+            // guest group must select the same relative lane in its quad.
+            Dpp::Lanes { sel, fi: false } if self.s.pixel => (0..4).all(|lane| {
+                let first = (sel >> (3 * lane)) & 7;
+                let second = (sel >> (3 * (lane + 4))) & 7;
+                first < 4 && second == first + 4
+            }),
+            Dpp::Lanes { .. } => false,
+        };
         let mesh_quad = self.s.mesh.is_some() && quad;
         if !mesh_quad {
             self.cross_lane(quad)?;
+        }
+        if self.s.pixel && quad && let Dpp::Lanes { sel, .. } = dpp {
+            let lanes = [0, 1, 2, 3].map(|i| ((sel >> (3 * i)) & 3) as u8);
+            return Ok((self.quad_read(x, lanes), None));
         }
         let c = self.cur;
         let lane = self.lane_index();

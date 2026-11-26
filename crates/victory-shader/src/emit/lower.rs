@@ -7867,6 +7867,9 @@ impl<'a> Lower<'a> {
         }
         let mut guard = self.guard(b, i)?;
         if let Some(d) = v.dpp {
+            if guard.is_some() && self.s.pixel && matches!(d, Dpp::Lanes { .. }) {
+                return Err("a predicated pixel DPP8");
+            }
             let (x, enable) = self.dpp(inst, d)?;
             guard = match (guard, enable) {
                 (Some(g), Some(e)) => Some(self.s.m.bin(self.cur, Bin::And, g, e)),

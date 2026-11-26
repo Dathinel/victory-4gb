@@ -133,6 +133,25 @@ fn pixel_quad_swizzles_validate_and_dpp8_cannot_cross_quads() {
     assert!(read(mov_dpp8(3, 2, sel ^ 4)).is_err());
 }
 
+#[test]
+fn pixel_dpp8_with_a_predicated_source_is_rejected() {
+    let swap_x = [1u32, 0, 3, 2, 5, 4, 7, 6];
+    let sel = swap_x.into_iter().enumerate().fold(0, |s, (i, v)| s | v << (3 * i));
+    let [first, second] = mov_dpp8(3, 2, sel);
+    let words = [
+        0xC808_0000, 0xC809_0001, // interpolate v2
+        0x7E06_0280, // v_mov_b32 v3, 0
+        0x7D88_0481, // v_cmp_gt_u32 vcc, 1, v2
+        0xBE80_3C6A, // s_and_saveexec_b32 s0, vcc_lo
+        first, second,
+        0xBEFE_0300, // s_mov_b32 exec_lo, s0
+        0xF800_180F, 0x0303_0303, S_ENDPGM,
+    ];
+    let result = pixel(&words, PERSP_CENTER, &[element("TEXCOORD", 0, 0)], true);
+    eprintln!("masked DPP8: {:?}", result.as_ref().err());
+    assert!(result.is_err_and(|e| e.to_string().contains("predicated pixel DPP8")));
+}
+
 /// A vertex shader passing a float4 POSITION through to `SV_Position`.
 fn pass_position() -> Vec<u8> {
     let mut vs = Shader::new(false);
@@ -206,7 +225,7 @@ fn pixel_quad_reads_take_helper_coordinates_at_a_shared_triangle_edge() {
     // Pixel centres: lane 0 of a quad is its top left, lane 3 bottom right.
     // A name, the four reads (pattern, coordinate) and the expected texel.
     type Case = (&'static str, [(u32, u32); 4], fn(f32, f32) -> [f32; 4]);
-    let cases: [Case; 2] = [
+    let cases: [Case; 3] = [
         (
             "broadcast",
             // x of lanes 0 and 1, y of lanes 2 and 3.
@@ -225,6 +244,18 @@ fn pixel_quad_reads_take_helper_coordinates_at_a_shared_triangle_edge() {
                 [x, y, x, y]
             },
         ),
+        (
+            "cycle",
+            // Sources [1, 2, 0, 3] rotate three lanes; the inverse differs.
+            [(0xc9, 0), (0xc9, 1), (0xc9, 0), (0xc9, 1)],
+            |x, y| {
+                let lane = (x as usize % 2) + 2 * (y as usize % 2);
+                let src = [1usize, 2, 0, 3][lane];
+                let sx = x - x % 2.0 + (src % 2) as f32 + 0.5;
+                let sy = y - y % 2.0 + (src / 2) as f32 + 0.5;
+                [sx, sy, sx, sy]
+            },
+        ),
     ];
     let vs = pass_position();
     let corners = [
@@ -236,6 +267,9 @@ fn pixel_quad_reads_take_helper_coordinates_at_a_shared_triangle_edge() {
     let halves = [[0, 1, 2], [1, 2, 3]].map(|t| t.map(|i| corners[i]));
     let mut failures = Vec::new();
     for (name, warp) in [("hardware", false), ("WARP", true)] {
+        if !warp && std::env::var("VICTORY_WARP").as_deref() == Ok("1") {
+            continue;
+        }
         let Ok(host) = Host::new(warp) else {
             eprintln!("no SM 6.6 {name} device; skipped");
             continue;

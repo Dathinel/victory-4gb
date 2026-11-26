@@ -7890,7 +7890,17 @@ impl<'a> Lower<'a> {
         };
         let x = self.i32_of(inst.read(Reg::V(reg)).ok_or("a DPP operand")?)?;
         // Quad permutations and DPP8 stay in groups the pixel layout shares.
-        let quad = matches!(dpp, Dpp::Row { ctrl: 0..=0xFF, .. });
+        let quad = match dpp {
+            Dpp::Row { ctrl, .. } => ctrl <= 0xff,
+            // Pixel waves may contain just one quad. Each half of the
+            // guest group must select the same relative lane in its quad.
+            Dpp::Lanes { sel, .. } if self.s.pixel => (0..4).all(|lane| {
+                let first = (sel >> (3 * lane)) & 7;
+                let second = (sel >> (3 * (lane + 4))) & 7;
+                first < 4 && second == first + 4
+            }),
+            Dpp::Lanes { .. } => false,
+        };
         let mesh_quad = self.s.mesh.is_some() && quad;
         if !mesh_quad {
             self.cross_lane(quad)?;

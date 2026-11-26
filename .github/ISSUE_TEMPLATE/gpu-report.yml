@@ -1,0 +1,33 @@
+name: GPU report / Informe de GPU
+description: Share a result from a low-VRAM PC, including a failed run or a synthetic test.
+title: "[GPU] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        English or Spanish is welcome. A single observation helps. For synthetic tests, give the test name and result. Share text only and remove personal paths.
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and VRAM / Tarjeta y memoria
+      placeholder: e.g. GTX 1650 Laptop, 4 GB dedicated, driver version if known
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Branch and commit / Rama y commit
+      description: Run git rev-parse --short HEAD in the checkout, or give the build label if known.
+      placeholder: coolfox-4gb or main, followed by the revision
+  - type: textarea
+    id: observation
+    attributes:
+      label: What did you test and see? / ¿Qué probaste y qué viste?
+      description: Give the test or scene, expected result, and actual result. An error message or a last successful step helps.
+    validations:
+      required: true
+  - type: textarea
+    id: comparison
+    attributes:
+      label: Optional measurements / Mediciones opcionales
+      description: Include OS, resolution, settings changed, frame time or FPS, and memory if available. For A/B runs use the same scene and say whether the cache was warm.

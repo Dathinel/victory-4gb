@@ -1,0 +1,85 @@
+<#
+.SYNOPSIS
+  Starts the title on a small card (measured on an RTX 3050 Laptop 4 GB, Series S profile).
+
+.DESCRIPTION
+  -Quality picks a preset; -TextureScale, -RenderScale and -TextureBudgetMB override it.
+
+    low     textures at 0.25, render scale 0.5   (the set every measurement in the README uses)
+    medium  textures at 0.5,  render scale 0.5
+    high    textures at 1,    the title's own render size, 2,500 MB of textures (slow; a look, not a way to play)
+
+  Texture scale is per side: 0.5 keeps a quarter of a texture's bytes, 0.25 a sixteenth
+  (VICTORY_TEXTURE_DROP_MIPS 1 and 2). On a 4 GB card the layer lets title textures fill about
+  840 MB and no more, so a smaller scale means more textures present, not only smaller ones.
+
+  Render scale 0.5 uses the title's own upscaler. "native" leaves the Series S profile as it is
+  (two thirds, FSR4). A full-size render does not exist on this profile: the title stops at its
+  own render-target pool check.
+
+.EXAMPLE
+  scripts\play-4gb.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe'
+.EXAMPLE
+  scripts\play-4gb.ps1 -Exe '...' -Quality low -TextureScale 0.5
+.EXAMPLE
+  scripts\play-4gb.ps1 -Exe '...' -Quality high -Show
+#>
+param(
+    [Parameter(Mandatory)][string]$Exe,
+    [ValidateSet('low', 'medium', 'high')][string]$Quality = 'low',
+    [ValidateSet('1', '0.5', '0.25')][string]$TextureScale,
+    [ValidateSet('0.5', 'native')][string]$RenderScale,
+    [int]$TextureBudgetMB,
+    # The layer's executable; target\diag\victory.exe of this checkout if not given.
+    [string]$Victory,
+    # Prints the switches and starts nothing.
+    [switch]$Show
+)
+if (-not $Victory) { $Victory = Join-Path $PSScriptRoot '..\target\diag\victory.exe' }
+
+$presets = @{
+    low    = @{ Texture = '0.25'; Render = '0.5';    Budget = 0 }
+    medium = @{ Texture = '0.5';  Render = '0.5';    Budget = 0 }
+    high   = @{ Texture = '1';    Render = 'native'; Budget = 2500 }
+}
+$p = $presets[$Quality]
+if ($TextureScale) { $p.Texture = $TextureScale }
+if ($RenderScale) { $p.Render = $RenderScale }
+if ($PSBoundParameters.ContainsKey('TextureBudgetMB')) { $p.Budget = $TextureBudgetMB }
+
+$set = [ordered]@{
+    VICTORY_LEVELS_ON_DEMAND  = '1'
+    VICTORY_TEXTURE_NO_WAIT   = '1'
+    VICTORY_AMBIENT           = '0.8'
+    VICTORY_AMBIENT_AIR       = '1.5'
+    VICTORY_AMBIENT_SETTLE    = '250,3'
+    VICTORY_AMBIENT_MARCH     = '3'
+    VICTORY_RELAY_COPY        = '1'
+    VICTORY_CARD_REHASH_RUNS  = '1'
+    VICTORY_JOIN_COPIES       = '1'
+    VICTORY_INDIRECT_WINDOW   = '1'
+    VICTORY_INDIRECT_BATCH    = '2'
+    VICTORY_NAN_SCRUB         = '1'
+    VICTORY_BAKE_SOURCES      = 'full'
+    VICTORY_TEXTURE_DROP_MIPS = @{ '1' = '0'; '0.5' = '1'; '0.25' = '2' }[$p.Texture]
+}
+if ($p.Render -eq '0.5') {
+    $set.VICTORY_UPSCALER = '6'
+    $set.VICTORY_RENDER_SCALE = '0.5'
+}
+if ($p.Budget -gt 0) { $set.VICTORY_TEXTURE_BUDGET_MB = "$($p.Budget)" }
+$list = Join-Path $PSScriptRoot 'rt_off_hashes.txt'
+if (Test-Path $list) { $set.VICTORY_SKIP_PIPELINES = ((Get-Content $list -Raw) -replace '\s', '') }
+
+"quality ${Quality}: textures at $($p.Texture), render scale $($p.Render)" + $(if ($p.Budget) { ", $($p.Budget) MB of textures" })
+if ($Show) {
+    $set.GetEnumerator() | ForEach-Object {
+        $v = $_.Value; if ($v.Length -gt 60) { $v = $v.Substring(0, 40) + "... ($($v.Length) characters)" }
+        "$($_.Key)=$v"
+    }
+    return
+}
+if (-not (Test-Path $Victory)) { throw "no ${Victory}: build it first (cargo build --profile diag -p victory --features diagnostics)" }
+if (-not (Test-Path $Exe)) { throw "no $Exe" }
+$set.GetEnumerator() | ForEach-Object { Set-Item "env:$($_.Key)" $_.Value }
+& $Victory run $Exe --console series-s --execute

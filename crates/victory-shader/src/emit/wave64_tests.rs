@@ -866,3 +866,55 @@ fn the_lanes_past_a_count_of_threads_do_not_run() {
         }
     }
 }
+
+#[test]
+fn scatter_selects_the_highest_active_sender_per_half() {
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    for (threads, collide, twice) in [(32, false, false), (64, false, false), (64, true, false), (128, true, true)] {
+        let mut prog = bpermute_program(threads, 0, collide && !twice);
+        let mut code: Vec<u32> = prog.code.chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap())).collect();
+        let distinct_halves = threads == 64 && !collide;
+        if collide || distinct_halves {
+            let addr = code.iter_mut().find(|w| **w == 0x3a04_0000).unwrap();
+            *addr = if distinct_halves {
+                0x2c04_0085 // v_lshrrev_b32 v2, 5, v0: upper half targets slot one
+            } else {
+                0x7e04_0280 // v_mov_b32 v2, 0
+            };
+        }
+        let op = code.iter().position(|&w| w == 0xdacc_0000).unwrap();
+        code[op] = 0xdac8_0000; // ds_permute_b32
+        if twice {
+            // Rotate the first result by one within each half (v2 = v0 << 2).
+            code.splice(op+2..op+2, [0x3404_0082, 0xdac8_0004, (3u32 << 24) | (3 << 8) | 2]);
+        }
+        prog.code = code.into_iter().flat_map(u32::to_le_bytes).collect();
+        let p = ir::build(&prog.code, prog.wave64, prog.vgprs).unwrap();
+        for width in [32, 64] {
+            let mut shader = lowered_on(&prog, &p, &HashSet::new(), width).expect("lower scatter");
+            if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+                v.validate(&mut shader.dxil).expect("valid scatter shader");
+            }
+
+            for active in [threads, threads - 5, 1] {
+                let Some(got) = on_the_card_uav(&shader, width, [1, active], threads) else { break };
+                let scatter = |input: &[u32], second: bool| {
+                    let mut out = vec![0x5555_5555; threads as usize];
+                    out[..active as usize].fill(0);
+                    for sender in 0..active {
+                        let address = if second { sender + 1 } else if distinct_halves { sender >> 5 } else if collide { 0 } else { sender ^ 1 };
+                        let dst = (sender & !31) | (address & 31);
+                        if dst < active {
+                            out[dst as usize] = input[sender as usize];
+                        }
+                    }
+                    out
+                };
+                let mut want = scatter(&(1000..1000+threads).collect::<Vec<_>>(), false);
+                if twice { want = scatter(&want, true); }
+                assert_eq!(got, want, "threads={threads} active={active} collide={collide} twice={twice}");
+            }
+        }
+    }
+}

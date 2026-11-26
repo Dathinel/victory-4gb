@@ -1447,7 +1447,7 @@ impl<'a> Lower<'a> {
             // `ds_swizzle`, `ds_bpermute`, `v_permlane16` / `v_permlanex16`, which the ISA confines there – runs
             // exactly in waves of 32: the thread relabelling makes each host wave one half of a
             // console wave (lanes 32k..32k+31). Not when it crosses halves (`v_mbcnt`,
-            // `v_readlane`, `v_writelane`, `ds_permute`, masks as numbers or lane-constant
+            // `v_readlane`, `v_writelane`, masks as numbers or lane-constant
             // masks), nor when LDS may be shared within the console wave without barriers (a
             // group over 32 threads with LDS): those still need 64-lane waves.
             if wave == 64 && host_max_wave() == 32 && (console_lanes || one_wave && s.lds_dwords > 0) {
@@ -1455,7 +1455,6 @@ impl<'a> Lower<'a> {
                     let n = i.name();
                     n.starts_with("v_mbcnt")
                         || matches!(n, "v_readlane_b32" | "v_writelane_b32")
-                        || n.starts_with("ds_permute")
                         || reads_mask_as_data(x.st, i)
                 }) || lane_constant_masks(x.st)
                     || !x.st.wide.is_empty();
@@ -1515,8 +1514,6 @@ impl<'a> Lower<'a> {
                             "v_readlane"
                         } else if n == "v_writelane_b32" {
                             "v_writelane"
-                        } else if n.starts_with("ds_permute") {
-                            "ds_permute"
                         } else if reads_mask_as_data(x.st, i) {
                             "mask as data"
                         } else {
@@ -4986,6 +4983,58 @@ impl<'a> Lower<'a> {
             };
             let reg = dst_reg.ok_or("a swizzle result")?;
             self.write(inst, Reg::V(reg), r, guard);
+            return Ok(());
+        }
+        if name == "ds_permute_b32" {
+            self.cross_lane(false)?;
+            let addr = self.vgprs(inst, addr.as_ref().ok_or("a scatter address")?, 1)?[0];
+            let data = self.vgprs(inst, data.first().ok_or("a scatter source")?, 1)?[0];
+            let offset = self.s.m.i32(offset);
+            let bytes = self.s.m.bin(c, Bin::Add, addr, offset);
+            let two = self.s.m.i32(2);
+            let target = self.s.m.bin(c, Bin::LShr, bytes, two);
+            let lane = self.lane_index();
+            let zero = self.s.m.i32(0);
+            let k32 = self.s.m.i32(32);
+            let half = self.s.m.bin(c, Bin::And, lane, k32);
+            let upper = self.s.m.cmp(c, pred::NE, half, zero);
+            let i32t = self.s.t.i32;
+            let four = self.s.m.named_struct("dx.types.fouri32", vec![i32t; 4]);
+            let ballot = |l: &mut Self, pred: V| {
+                let vote = l.s.op(c, "waveActiveBallot", Attr::NoUnwind, four, 116, &[pred]);
+                let low = l.s.m.extract(c, vote, 0);
+                if l.s.wave_size == Some(64) {
+                    let high = l.s.m.extract(c, vote, 1);
+                    l.s.m.select(c, upper, high, low)
+                } else {
+                    low
+                }
+            };
+            // For each destination bit keep the senders whose address matches
+            // this lane. The final mask contains only senders in our own half.
+            let on = guard.unwrap_or_else(|| self.s.m.bool(true));
+            let mut senders = ballot(self, on);
+            let ones = self.s.m.i32(u32::MAX);
+            for bit in 0..5 {
+                let mask = self.s.m.i32(1 << bit);
+                let target_bit = self.s.m.bin(c, Bin::And, target, mask);
+                let set = self.s.m.cmp(c, pred::NE, target_bit, zero);
+                let votes = ballot(self, set);
+                let inverse = self.s.m.bin(c, Bin::Xor, votes, ones);
+                let lane_bit = self.s.m.bin(c, Bin::And, lane, mask);
+                let take_set = self.s.m.cmp(c, pred::NE, lane_bit, zero);
+                let matching = self.s.m.select(c, take_set, votes, inverse);
+                senders = self.s.m.bin(c, Bin::And, senders, matching);
+            }
+            let leading = self.s.op(c, "unaryBits.i32", Attr::ReadNone, i32t, 33, &[senders]);
+            let last = self.s.m.i32(31);
+            let winner = self.s.m.bin(c, Bin::Sub, last, leading);
+            let winner = self.s.m.bin(c, Bin::Or, half, winner);
+            let any = self.s.m.cmp(c, pred::NE, senders, zero);
+            let safe = self.s.m.select(c, any, winner, lane);
+            let value = self.read_lane(data, safe);
+            let result = self.s.m.select(c, any, value, zero);
+            self.write(inst, Reg::V(dst_reg.ok_or("a scatter result")?), result, guard);
             return Ok(());
         }
         if name == "ds_bpermute_b32" {

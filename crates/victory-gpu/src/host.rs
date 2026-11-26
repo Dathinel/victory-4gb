@@ -1060,6 +1060,21 @@ mod tests {
         let unavailable = peek(C::TimingUnavailable);
         host.collect_batch_times(fence + 1, [&a].into_iter());
         assert_eq!(peek(C::TimingUnavailable) - unavailable, 1);
+        // Inject pairs into the completed synthetic list's private readback.
+        let (_, back) = b.stamps().unwrap();
+        for (start, end, valid) in [(0u64, 9u64, false), (9, 8, false), (9, 9, true)] {
+            let mut ptr = std::ptr::null_mut();
+            unsafe {
+                back.Map(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }), Some(&mut ptr)).unwrap();
+                std::ptr::copy_nonoverlapping([start, end].as_ptr(), ptr.cast(), 2);
+                back.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 16 }));
+            }
+            let before = peek(C::TimingUnavailable);
+            let measured = peek(C::TimingMeasured);
+            host.collect_batch_times(fence, [&b].into_iter());
+            assert_eq!(peek(C::TimingUnavailable) - before, u64::from(!valid));
+            assert_eq!(peek(C::TimingMeasured) - measured, u64::from(valid));
+        }
         let full = host.new_list().unwrap();
         for _ in 0..STAMPS + 2 {
             full.note_op(|| "overflow-test".to_owned());
@@ -6382,14 +6397,19 @@ impl HostList {
             s
         };
         let mut times: Vec<(f64, String)> = (0..count)
-            .map(|i| {
-                let ticks = stamps[i + 1].saturating_sub(stamps[i]);
+            .filter_map(|i| {
+                let ticks = if batch_timing() {
+                    if stamps[i] == 0 { return None; }
+                    stamps[i + 1].checked_sub(stamps[i])?
+                } else {
+                    stamps[i + 1].saturating_sub(stamps[i])
+                };
                 let label = if batch_timing() {
                     crate::copystat::command_key(&notes[i].0)
                 } else {
                     notes[i].0.chars().take(300).collect()
                 };
-                (ticks as f64 * 1e3 / frequency.max(1) as f64, label)
+                Some((ticks as f64 * 1e3 / frequency.max(1) as f64, label))
             })
             .collect();
         if n != usize::MAX {

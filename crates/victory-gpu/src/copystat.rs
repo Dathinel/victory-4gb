@@ -1320,7 +1320,7 @@ pub(crate) fn log(frames: f64) {
     }
     if crate::host::batch_timing() {
         tracing::info!(
-            "GPU timing coverage per frame (annotated commands): {:.1} measured, {:.1} overwritten by list reuse, {:.1} beyond query capacity, {:.1} unavailable",
+            "GPU timing coverage per frame (annotated commands in collected lists): {:.1} measured, {:.1} overwritten by list reuse, {:.1} beyond query capacity, {:.1} unavailable",
             c[C::TimingMeasured as usize], c[C::TimingOverwritten as usize],
             c[C::TimingTruncated as usize], c[C::TimingUnavailable as usize],
         );

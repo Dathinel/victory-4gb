@@ -62,7 +62,7 @@ The set this card runs best with so far:
 ```
 VICTORY_LEVELS_ON_DEMAND=1 VICTORY_TEXTURE_NO_WAIT=1 VICTORY_AMBIENT=0.8 VICTORY_AMBIENT_AIR=1.5
 VICTORY_RELAY_COPY=1 VICTORY_CARD_REHASH_RUNS=1 VICTORY_JOIN_COPIES=1 VICTORY_INDIRECT_WINDOW=1
-VICTORY_INDIRECT_BATCH=2 VICTORY_NAN_SCRUB=1 VICTORY_TEXTURE_DROP_MIPS=1 VICTORY_BAKE_SOURCES=full
+VICTORY_INDIRECT_BATCH=2 VICTORY_NAN_SCRUB=1 VICTORY_TEXTURE_DROP_MIPS=2 VICTORY_BAKE_SOURCES=full
 VICTORY_UPSCALER=6 VICTORY_RENDER_SCALE=0.5 VICTORY_AMBIENT_SETTLE=250,3 VICTORY_AMBIENT_MARCH=3
 ```
 
@@ -93,7 +93,13 @@ at a time and does not show where the time of a normal run goes.
   target dump of one black-skin frame has skin albedo 0 in the G-buffer (lips, eyes, hair and
   clothes are there): the texture had no host copy on a full 4 GB card. `VICTORY_BAKE_SOURCES=full`
   (UwUCammie's fork pull request #1264, ported here) takes bake draws sampling a missing texture
-  from 104 of 107 to 0 of 111, which is necessary and not enough. Issue #3 has what was tried.
+  from 104 of 107 to 0 of 111, which is necessary and not enough.
+  The rule behind it: on a 4 GB card the tree lets title textures fill a quarter of the budget
+  (about 840 MB) and then never admits more, with 6 to 7.5 GB of them waiting and no eviction.
+  `VICTORY_TEXTURE_DROP_MIPS=2` puts about twice the textures in the same bytes: in two runs of
+  two the boat cutscene has every face and a patterned shirt that had been black in about twenty
+  runs before. The loading of the first scene is still wrong (white captures, untextured
+  stand-ins). Issue #3 has the numbers and the code changes that would fix it properly.
 - **Interiors and night.** The green-brown fog veil over interiors is located and, in three runs
   of three, gone with `VICTORY_AMBIENT_SETTLE=250,3 VICTORY_AMBIENT_MARCH=3` (pull request #15,
   the measurements in issue #2). It travelled the title's ray-marched in-scatter, which nothing

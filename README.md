@@ -18,7 +18,7 @@ side by side with numbers from the same card, so that others can close the gap. 
 | Branch | What it is | In the first gameplay scene, on this card | Picture |
 |---|---|---|---|
 | `main` | [fxceless/victory-fork](https://github.com/fxceless/victory-fork) `main` + pull requests and ports listed below | **5.4 to 6.7 fps** (145 to 185 ms a frame at about 4,400 draws) | clothes lit by the added ambient light, window glass right; skin and rooms still too dark |
-| `coolfox-4gb` | codec-d's `cool_fox` at `f4b48ad` (the leading public build on PortWatch until it was taken down) + the render-scale port | **4.4 to 4.6 fps** (218 to 228 ms) with a short switch set; 2.4 to 2.5 fps (400 to 418 ms) with its own NVIDIA launcher's set | the best here: face, neck, hair, clothes and walls lit |
+| `coolfox-4gb` | codec-d's `cool_fox` at `f4b48ad` (the leading public build on PortWatch until it was taken down) + the render-scale port | **5.2 to 5.5 fps** (184 to 192 ms) with the switch set below; 2.4 to 2.5 fps (400 to 418 ms) with its own NVIDIA launcher's set | the best here: face, neck, hair, clothes and walls lit; with the ray-tracing passes skipped the room is lit warm and the haze is gone (one run) |
 
 The two are not merged. A trial merge stops on 39 files and about 300 hunks, most of them in
 `crates/victory-gpu/src` (`host.rs` 91, `draw.rs` 39, `indirect.rs` 30, `descriptor/host.rs` 26,
@@ -38,11 +38,28 @@ With only `VICTORY_LEVELS_ON_DEMAND=1 VICTORY_TEXTURE_NO_WAIT=1` the same tree, 
 the neck. Adding `VICTORY_THIN=1 VICTORY_JOIN_PARTS=8 VICTORY_UPLOAD_AHEAD=1 VICTORY_SHOW_AFTER=1
 VICTORY_MAP_THREADS=1 VICTORY_CARD_AWAKE=1` on top: 238 to 240 ms, so not those either.
 
-So about 200 ms of card time a frame come from one or more of the launcher's remaining switches:
-`VICTORY_RELAY`, `VICTORY_RELAY_COPY`, `VICTORY_WIDE_BACK`, `VICTORY_CARD_REHASH_RUNS`,
-`VICTORY_JOIN_COPIES`, `VICTORY_INDIRECT_WINDOW`, `VICTORY_INDIRECT_BATCH`. Which one is the next
-measurement. They are the ones that cut the copy-back on a large card; here the copy-back is then
-the open cost (84 to 90 ms a frame).
+Measured since: the seven remaining switches are not it either (with `VICTORY_RELAY_COPY=1
+VICTORY_CARD_REHASH_RUNS=1 VICTORY_JOIN_COPIES=1 VICTORY_INDIRECT_WINDOW=1 VICTORY_INDIRECT_BATCH=2`
+added the frame is 204 to 208 ms, 4.8 to 4.9 fps). What loads the card is `VICTORY_CARD_STEPS=2`
+and/or `VICTORY_CARD_BUFFERS_MIN_KB`; the continuation's 4 GB launcher, which keeps them, runs at
+2.2 to 2.8 fps here.
+
+The set this card runs best with so far:
+
+```
+VICTORY_LEVELS_ON_DEMAND=1 VICTORY_TEXTURE_NO_WAIT=1 VICTORY_AMBIENT=0.8 VICTORY_AMBIENT_AIR=1.5
+VICTORY_RELAY_COPY=1 VICTORY_CARD_REHASH_RUNS=1 VICTORY_JOIN_COPIES=1 VICTORY_INDIRECT_WINDOW=1
+VICTORY_INDIRECT_BATCH=2 VICTORY_NAN_SCRUB=1 VICTORY_TEXTURE_DROP_MIPS=1
+```
+
+184 to 192 ms a frame (98 to 111 ms on the GPU, 65 to 67 ms preparing), 5.2 to 5.5 fps, about
+3,350 of 3,300 MB of card memory budgeted, no banding from the dropped texture level
+(`VICTORY_NAN_SCRUB` and `VICTORY_TEXTURE_DROP_MIPS` are miaohaixiang1-netizen's commits, picked
+from cool-fox-12gb). Adding `VICTORY_SKIP_PIPELINES` with the list in
+[`scripts/rt_off_hashes.txt`](scripts/rt_off_hashes.txt) (trustno1-coder's, 1,034 programs of the
+ray-traced passes) keeps the speed (5.3 to 5.4 fps) and, in the one run so far, gave the best
+picture on this card: character and room lit, the white haze gone. One run only; the character's
+light varies between identical runs, so this needs repeating.
 
 A dead end worth knowing: `VICTORY_GPU_TIMING=1` named one group of lists at about 113 ms a frame
 ([`docs/coolfox-113ms-group.txt`](docs/coolfox-113ms-group.txt): depth of field, autofocus, the

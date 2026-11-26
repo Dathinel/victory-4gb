@@ -18,21 +18,37 @@ side by side with numbers from the same card, so that others can close the gap. 
 | Branch | What it is | In the first gameplay scene, on this card | Picture |
 |---|---|---|---|
 | `main` | [fxceless/victory-fork](https://github.com/fxceless/victory-fork) `main` + pull requests and ports listed below | **5.4 to 6.7 fps** (145 to 185 ms a frame at about 4,400 draws) | clothes lit by the added ambient light, window glass right; skin and rooms still too dark |
-| `coolfox-4gb` | codec-d's `cool_fox` at `f4b48ad` (the leading public build on PortWatch until it was taken down) + the render-scale port | **2.4 to 2.5 fps** (400 to 418 ms) | the best here: face, neck, hair, clothes and walls lit |
+| `coolfox-4gb` | codec-d's `cool_fox` at `f4b48ad` (the leading public build on PortWatch until it was taken down) + the render-scale port | **4.4 to 4.6 fps** (218 to 228 ms) with a short switch set; 2.4 to 2.5 fps (400 to 418 ms) with its own NVIDIA launcher's set | the best here: face, neck, hair, clothes and walls lit |
 
 The two are not merged. A trial merge stops on 39 files and about 300 hunks, most of them in
 `crates/victory-gpu/src` (`host.rs` 91, `draw.rs` 39, `indirect.rs` 30, `descriptor/host.rs` 26,
 `shadow.rs` 23, `watch.rs` 22). They share a base (`a26859f`, 25 November 2026).
 
-### Why `coolfox-4gb` is slow here, and why that is the interesting part
+### `coolfox-4gb` on a small card: which of its switches cost the card
 
-On this card that tree prepares a frame faster than `main` does (41 to 48 ms against 70 or more),
-and then waits for the card: 344 to 360 ms of every frame, the card about 97 % busy by its own
-count. Halving the render scale does not change it; skipping the ray-tracing resolve passes does not
-change it. With `VICTORY_GPU_TIMING=1`, one group of ten lists with 22 compute programs takes about
-113 ms a frame; their hashes are in [`docs/coolfox-113ms-group.txt`](docs/coolfox-113ms-group.txt).
-What those programs are, and why they cost that on 32-lane waves, is not known yet. If that group
-can be made cheap, `coolfox-4gb` gets the picture at something like `main`'s frame rate.
+With the switch set of that tree's own NVIDIA launcher (`Play-VIctory.cmd pareto-residency`) this
+card is about 97 % busy and the frame waits for it: 344 to 370 ms "on the GPU" of a 400 to 425 ms
+frame, 2.4 fps. That does not move with the render scale, with the ray-tracing resolve passes
+skipped, with depth of field and autofocus skipped, or with `VICTORY_CARD_STEPS=0 VICTORY_RELAY=1
+VICTORY_CARD_BUFFERS_MIN_KB=1024`.
+
+With only `VICTORY_LEVELS_ON_DEMAND=1 VICTORY_TEXTURE_NO_WAIT=1` the same tree, same scene, runs at
+224 to 228 ms a frame (142 to 150 ms on the GPU, 84 to 90 ms copying back): 4.4 to 4.6 fps. Adding
+`VICTORY_AMBIENT=0.8 VICTORY_AMBIENT_AIR=1.5` costs nothing measurable and lights the clothes and
+the neck. Adding `VICTORY_THIN=1 VICTORY_JOIN_PARTS=8 VICTORY_UPLOAD_AHEAD=1 VICTORY_SHOW_AFTER=1
+VICTORY_MAP_THREADS=1 VICTORY_CARD_AWAKE=1` on top: 238 to 240 ms, so not those either.
+
+So about 200 ms of card time a frame come from one or more of the launcher's remaining switches:
+`VICTORY_RELAY`, `VICTORY_RELAY_COPY`, `VICTORY_WIDE_BACK`, `VICTORY_CARD_REHASH_RUNS`,
+`VICTORY_JOIN_COPIES`, `VICTORY_INDIRECT_WINDOW`, `VICTORY_INDIRECT_BATCH`. Which one is the next
+measurement. They are the ones that cut the copy-back on a large card; here the copy-back is then
+the open cost (84 to 90 ms a frame).
+
+A dead end worth knowing: `VICTORY_GPU_TIMING=1` named one group of lists at about 113 ms a frame
+([`docs/coolfox-113ms-group.txt`](docs/coolfox-113ms-group.txt): depth of field, autofocus, the
+scattering diffusion hierarchy, TAA utilities, a wind-field copy). Skipping the depth-of-field and
+autofocus programs of that group changed the frame by about 10 ms. The timing run sends lists one
+at a time and does not show where the time of a normal run goes.
 
 ## What is missing
 

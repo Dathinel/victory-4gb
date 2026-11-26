@@ -194,6 +194,8 @@ fn pass_position() -> Vec<u8> {
 /// target 0 gets v2..v5.
 fn quad_reads(dpp: bool, reads: [(u32, u32); 4]) -> HostShader {
     let mut words = vec![0xBEFE_097E]; // s_wqm_b32 exec_lo, exec_lo
+    words.push(0x100c_0300); // v_mul_f32 v6, v0, v1: x * y
+    words.extend([0x3a0e_0cff, 0x0041_2345]); // v_xor_b32 v7, 0x00412345, v6
     for (dst, (pattern, src)) in (2..).zip(reads) {
         words.extend(if dpp {
             let selectors = (0..8).fold(0, |bits, lane| {
@@ -225,7 +227,7 @@ fn pixel_quad_reads_take_helper_coordinates_at_a_shared_triangle_edge() {
     // Pixel centres: lane 0 of a quad is its top left, lane 3 bottom right.
     // A name, the four reads (pattern, coordinate) and the expected texel.
     type Case = (&'static str, [(u32, u32); 4], fn(f32, f32) -> [f32; 4]);
-    let cases: [Case; 3] = [
+    let cases: [Case; 4] = [
         (
             "broadcast",
             // x of lanes 0 and 1, y of lanes 2 and 3.
@@ -242,6 +244,18 @@ fn pixel_quad_reads_take_helper_coordinates_at_a_shared_triangle_edge() {
             |x, y| {
                 let (x, y) = (((x as u32) ^ 1) as f32 + 0.5, ((y as u32) ^ 1) as f32 + 0.5);
                 [x, y, x, y]
+            },
+        ),
+        (
+            "coordinate product",
+            [(0xe4, 6), (0xb1, 7), (0x4e, 6), (0x1b, 7)],
+            |x, y| {
+                let other_x = ((x as u32) ^ 1) as f32 + 0.5;
+                let other_y = ((y as u32) ^ 1) as f32 + 0.5;
+                let (x, y) = (x + 0.5, y + 0.5);
+                // Flip mantissa bits only, so every expected f32 stays finite.
+                let flip = |v: f32| f32::from_bits(v.to_bits() ^ 0x0041_2345);
+                [x * y, flip(other_x * y), x * other_y, flip(other_x * other_y)]
             },
         ),
         (

@@ -38,15 +38,7 @@
 //! - **Upscaler.** `VICTORY_UPSCALER=<kind>` makes the picker return
 //!   `kind` (pull request #53): 6 the title's own, 7 FidelityFX.
 
-/// What became of a site. (In the fork this module comes from, avatarmanz/VIctory-7900XTX,
-/// this is `frame_rate::Patched`; that module is not in this tree.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Patched {
-    Done,
-    /// Its bytes are not the ones expected: left alone.
-    Differs,
-    Failed(&'static str),
-}
+use crate::frame_rate::Patched;
 
 /// Sizes the title has a display mode for (its own list, +0x615c0c0).
 pub const MODES: [(u32, u32); 5] = [(1280, 720), (1664, 936), (1920, 1080), (2560, 1440), (3840, 2160)];

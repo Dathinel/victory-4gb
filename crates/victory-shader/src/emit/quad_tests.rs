@@ -124,6 +124,9 @@ fn pixel_quad_swizzles_validate_and_dpp8_cannot_cross_quads() {
     let selections = [3u32, 0, 2, 1, 7, 4, 6, 5];
     let sel = (0..8).fold(0, |s, i| s | selections[i] << (3 * i));
     validate(&read(mov_dpp8(3, 2, sel)).unwrap());
+    let mut fetch_inactive = mov_dpp8(3, 2, sel);
+    fetch_inactive[0] += 1; // src0 = 0xea, FI enabled
+    assert!(read(fetch_inactive).is_err());
     // Change the upper quad alone while keeping its sources local.
     assert!(read(mov_dpp8(3, 2, sel ^ (1 << 12))).is_err());
     // Lane 0 now reads lane 7, in the other quad.

@@ -7894,7 +7894,7 @@ impl<'a> Lower<'a> {
             Dpp::Row { ctrl, .. } => ctrl <= 0xff,
             // Pixel waves may contain just one quad. Each half of the
             // guest group must select the same relative lane in its quad.
-            Dpp::Lanes { sel, .. } if self.s.pixel => (0..4).all(|lane| {
+            Dpp::Lanes { sel, fi: false } if self.s.pixel => (0..4).all(|lane| {
                 let first = (sel >> (3 * lane)) & 7;
                 let second = (sel >> (3 * (lane + 4))) & 7;
                 first < 4 && second == first + 4
@@ -7904,6 +7904,10 @@ impl<'a> Lower<'a> {
         let mesh_quad = self.s.mesh.is_some() && quad;
         if !mesh_quad {
             self.cross_lane(quad)?;
+        }
+        if self.s.pixel && quad && let Dpp::Lanes { sel, .. } = dpp {
+            let lanes = [0, 1, 2, 3].map(|i| ((sel >> (3 * i)) & 3) as u8);
+            return Ok((self.quad_read(x, lanes), None));
         }
         let c = self.cur;
         let lane = self.lane_index();

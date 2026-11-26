@@ -107,6 +107,7 @@ fn mov_dpp8(dst: u32, src: u32, sel: u32) -> [u32; 2] {
 fn pixel_quad_swizzles_validate_and_dpp8_cannot_cross_quads() {
     let read = |instruction: [u32; 2]| {
         let words = [
+            0xBEFE_097E, // s_wqm_b32 exec_lo, exec_lo
             0xC808_0000, // v_interp_p1_f32 v2, v0, attr0.x
             0xC809_0001, // v_interp_p2_f32 v2, v1, attr0.x
             instruction[0],
@@ -147,9 +148,18 @@ fn pixel_dpp8_with_a_predicated_source_is_rejected() {
         0xBEFE_0300, // s_mov_b32 exec_lo, s0
         0xF800_180F, 0x0303_0303, S_ENDPGM,
     ];
-    let result = pixel(&words, PERSP_CENTER, &[element("TEXCOORD", 0, 0)], true);
-    eprintln!("masked DPP8: {:?}", result.as_ref().err());
-    assert!(result.is_err_and(|e| e.to_string().contains("predicated pixel DPP8")));
+    let refused = |words: &[u32]| {
+        pixel(words, PERSP_CENTER, &[element("TEXCOORD", 0, 0)], true)
+            .is_err_and(|e| e.to_string().contains("outside known whole-quad execution"))
+    };
+    let mut narrowed = vec![0xBEFE_097E]; // Start with all helper lanes available.
+    narrowed.extend(words);
+    assert!(refused(&narrowed));
+    let mut branched = narrowed;
+    branched.insert(6, 0xBF88_0002); // s_cbranch_execz over DPP8
+    assert!(refused(&branched));
+    let exact = [words[0], words[1], first, second, words[8], words[9], S_ENDPGM];
+    assert!(refused(&exact));
 }
 
 /// A vertex shader passing a float4 POSITION through to `SV_Position`.

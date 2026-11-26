@@ -7867,8 +7867,21 @@ impl<'a> Lower<'a> {
         }
         let mut guard = self.guard(b, i)?;
         if let Some(d) = v.dpp {
-            if guard.is_some() && self.s.pixel && matches!(d, Dpp::Lanes { .. }) {
-                return Err("a predicated pixel DPP8");
+            if self.s.pixel && matches!(d, Dpp::Lanes { .. }) {
+                // A missing local guard can also mean that a divergent branch
+                // already excluded lanes. Only use helpers in a straight-line
+                // entry block after EXEC has explicitly entered whole-quad mode.
+                let exec = Reg::S(EXEC);
+                let last_mask = self.x.p.blocks[b].insts[..i].iter().rev().find(|op| {
+                    op.write(exec).is_some()
+                        || (self.x.p.wave64 && op.write(Reg::S(EXEC + 1)).is_some())
+                });
+                let wqm = if self.x.p.wave64 { "s_wqm_b64" } else { "s_wqm_b32" };
+                if guard.is_some() || b != 0 || !self.x.p.blocks[b].preds.is_empty()
+                    || !last_mask.is_some_and(|op| op.name() == wqm && op.write(exec).is_some())
+                {
+                    return Err("a pixel DPP8 outside known whole-quad execution");
+                }
             }
             let (x, enable) = self.dpp(inst, d)?;
             guard = match (guard, enable) {

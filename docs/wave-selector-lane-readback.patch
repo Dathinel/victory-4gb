@@ -1,0 +1,54 @@
+diff --git a/crates/victory-shader/src/emit/wave64_tests.rs b/crates/victory-shader/src/emit/wave64_tests.rs
+index 75eac6e..b9a124e 100644
+--- a/crates/victory-shader/src/emit/wave64_tests.rs
++++ b/crates/victory-shader/src/emit/wave64_tests.rs
+@@ -853,3 +853,48 @@ fn a_branch_that_writes_lds_two_different_values_keeps_64_lanes() {
+     // a second value after the read: what the flag ends up holding depends on what was read
+     assert_eq!(flag_wave(&flag_program(Some(2))), Some(64));
+ }
++
++#[test]
++fn synthetic_or_per_lane_readback() {
++    super::set_host_max_wave(32);
++    let bytes = std::fs::read(std::env::var_os("CODEX_OR_FIXTURE").unwrap()).unwrap();
++    let selected = super::wave_wide_only("9d5192aaa9e752d2");
++    let shader = super::with_wave_wide(selected, || super::translate(&bytes)).unwrap();
++    let warp = std::env::var_os("CODEX_OR_WARP").is_some();
++    let host = Host::new(warp).unwrap();
++    use windows::Win32::Graphics::Direct3D12::{D3D12_FEATURE_DATA_D3D12_OPTIONS1, D3D12_FEATURE_D3D12_OPTIONS1};
++    let mut caps = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
++    // SAFETY: caps has the type and size required by OPTIONS1.
++    unsafe { host.device.CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1,
++        (&raw mut caps).cast(), std::mem::size_of_val(&caps) as u32).unwrap(); }
++    eprintln!("adapter wave range: {}..{}", caps.WaveLaneCountMin, caps.WaveLaneCountMax);
++    let (root, pso) = host.compute_pipeline(&shader).unwrap();
++    let mut errors = 0;
++    for below in [0u32, 1, 10, 31, 32, 33, 40, 63, 64] {
++        let count = below.div_ceil(2);
++        let expected = ((1u64 << count) - 1) as u32;
++        let mut user_data = vec![0; shader.user_data_dwords().max(1) as usize];
++        for u in &shader.user_data {
++            if (u.root, u.slot, u.dword) == (RootType::Constants, 0, 0) {
++                user_data[u.index as usize] = below;
++            }
++        }
++        let result = host.dispatch(&root, &pso, &Dispatch {
++            roots: vec![(0, Root::Constants(user_data))], views: &[View::RawUav(64)],
++            samplers: &[], groups: [1, 1, 1],
++        }).unwrap();
++        let mut wrong = [0u32; 3];
++        for (lane, &got) in result[0].iter().enumerate() {
++            let active = (lane as u32) < below;
++            let want = if active { expected } else { 0 };
++            if got != want {
++                wrong[if !active { 2 } else { usize::from(lane >= 32) }] += 1;
++            }
++        }
++        assert_eq!(result[0].len(), 64);
++        errors += wrong.iter().sum::<u32>();
++        eprintln!("threshold={below} wrong_low={} wrong_high={} wrong_inactive={} lane0={:08x} lane32={:08x}", wrong[0], wrong[1], wrong[2], result[0][0], result[0][32]);
++    }
++    eprintln!("selected={selected} warp={warp} mismatches={errors}/576");
++    assert_eq!(errors, 0);
++}
+\ No newline at end of file

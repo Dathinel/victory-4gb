@@ -189,6 +189,30 @@ the authors of commits you bring from elsewhere (GPL-3.0-or-later) and say where
 what you measured and on what, and what you did not test. Results that say "this did not help" are
 as welcome as fixes: several are listed above.
 
+### Test a shader on your GPU
+
+A Windows PC with a 4 GB GPU can contribute a shader result without any game files. This test
+runs a synthetic 64-lane floating-point sum on a Direct3D 12 GPU that supports Shader Model 6.6 and 32-lane waves, then compares
+the value read back from the card with a CPU reference. Use the Rust toolchain, MSVC build tools
+and Windows SDK listed under [Build and run](#build-and-run).
+
+From the repository root on the `coolfox-4gb` branch, run in PowerShell:
+
+```powershell
+git rev-parse --short HEAD
+$env:VICTORY_WARP = "0"  # Use the default hardware adapter in this PowerShell session
+cargo test --locked -p victory-shader --lib a_sum_of_halves_over_the_wave_is_the_consoles_tree_bit_for_bit -- --nocapture
+```
+
+On an RTX 3050 Laptop (4 GB) the hardware readback printed `ran on the hardware device: the sum
+0x5914 of the console's tree`. If the output says `not run`, the GPU check was skipped even if
+Cargo reports a pass. If it says `0 tests`, check the branch and test name.
+
+Include the commit and the readback, skip message or first failed assertion in your
+[GPU report](CONTRIBUTING.md). On a PC with multiple GPUs the test uses the default adapter.
+If its identity is uncertain, mention the installed GPUs and mark the tested adapter as unknown. This checks the arithmetic result. Frame time and memory use
+require separate measurements.
+
 ## Credits
 
 Everything here stands on other people's work, and the commits keep their authors.

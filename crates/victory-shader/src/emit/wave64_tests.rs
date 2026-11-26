@@ -754,7 +754,7 @@ fn partial_group_wave64_on_wave32_assigns_every_thread_once() {
         (0x80 << 24) | (2 << 16) | (3 << 8) | 1,
     ];
     let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-    for threads in [16u32, 48u32] {
+    for threads in [16u32, 48, 64, 80] {
         let native = native_of(&words, true, threads);
         let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
         let shader = lowered(&native, &p, &HashSet::new()).expect("lower");
@@ -784,7 +784,7 @@ fn partial_group_wave64_on_wave32_assigns_every_thread_once() {
                 &pso,
                 &Dispatch {
                     roots: vec![(0, Root::Constants(ud))],
-                    views: &[View::RawUav(64)],
+                    views: &[View::RawUav(96)],
                     samplers: &[],
                     groups: [groups, 1, 1],
                 },
@@ -797,7 +797,7 @@ fn partial_group_wave64_on_wave32_assigns_every_thread_once() {
                 out[0][slot]
             );
         }
-        for slot in threads as usize..64 {
+        for slot in threads as usize..96 {
             assert_eq!(
                 out[0][slot], 0,
                 "threads={threads}: out-of-range slot {slot} was written ({})",

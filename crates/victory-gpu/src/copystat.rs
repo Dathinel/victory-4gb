@@ -225,6 +225,12 @@ pub(crate) fn command_took(op: &str, ms: f64) {
     e.2 = e.2.max(us);
 }
 
+#[cfg(test)]
+pub(crate) fn test_command_samples(key: &str) -> u64 {
+    let by = COMMANDS_BY_WORK.lock().unwrap_or_else(|e| e.into_inner());
+    by.as_ref().and_then(|map| map.get(key)).map_or(0, |entry| entry.0)
+}
+
 /// What a command's note is summed under: its pipeline (`[compute ...]`,
 /// `[mesh ..., pixel ...]`) with the command's first word, or without a
 /// pipeline its first two words.

@@ -10,15 +10,28 @@ video memory and measured there:
 **This repository contains no game files, code or assets.** You need your own copy of the game. It is
 not affiliated with or endorsed by the game's developer or publisher.
 
-It is not finished. The point of publishing it is that the fast line and the good-looking line are
-side by side with numbers from the same card, so that others can close the gap. The gap is light.
+## Where it stands (26 November 2026)
+
+On the machine above, branch `coolfox-4gb`, one 40-minute session played with an Xbox controller:
+from the first scene through the first mission and its chase to the boat mission in the open world,
+with no crash and no device loss. Median 4.0 fps over the session (423 one-second
+readings); 4.4 to 4.5 fps in the open-world boat scene and 5.2 to 5.5 fps in the first room in
+separate runs.
+
+- **Good:** daylight outdoors. Sky, water, vegetation, vehicles, characters and faces in the boat
+  mission and its cutscene, the minimap and the interface.
+- **Not good yet:** speed (4 to 5 fps); interiors and night (dark rooms, characters as silhouettes
+  with burned edges); characters' skin baked black or flat in some runs (a fix is in, see below).
+
+So: it can be played through, slowly, on a 4 GB laptop card. It is not finished, and pull requests
+are what would move it fastest: see [Contributing](#contributing).
 
 ## The two branches
 
 | Branch | What it is | In the first gameplay scene, on this card | Picture |
 |---|---|---|---|
 | `main` | [fxceless/victory-fork](https://github.com/fxceless/victory-fork) `main` + pull requests and ports listed below | **5.4 to 6.7 fps** (145 to 185 ms a frame at about 4,400 draws) | clothes lit by the added ambient light, window glass right; skin and rooms still too dark |
-| `coolfox-4gb` | codec-d's `cool_fox` at `f4b48ad` (the leading public build on PortWatch until it was taken down) + the render-scale port | **5.2 to 5.5 fps** (184 to 192 ms) with the switch set below; 2.4 to 2.5 fps (400 to 418 ms) with its own NVIDIA launcher's set | the best here: face, neck, hair, clothes and walls lit; with the ray-tracing passes skipped the room is lit warm and the haze is gone (one run) |
+| `coolfox-4gb` | codec-d's `cool_fox` at `f4b48ad` (the leading public build on PortWatch until it was taken down) + the render-scale port | **5.2 to 5.5 fps** (184 to 192 ms) with the switch set below; 2.4 to 2.5 fps (400 to 418 ms) with its own NVIDIA launcher's set | the best here: face, neck, hair, clothes and walls lit; with the ray-tracing passes skipped the room is lit warm and the haze is gone (one run); daylight outdoors right |
 
 The two are not merged. A trial merge stops on 39 files and about 300 hunks, most of them in
 `crates/victory-gpu/src` (`host.rs` 91, `draw.rs` 39, `indirect.rs` 30, `descriptor/host.rs` 26,
@@ -49,7 +62,7 @@ The set this card runs best with so far:
 ```
 VICTORY_LEVELS_ON_DEMAND=1 VICTORY_TEXTURE_NO_WAIT=1 VICTORY_AMBIENT=0.8 VICTORY_AMBIENT_AIR=1.5
 VICTORY_RELAY_COPY=1 VICTORY_CARD_REHASH_RUNS=1 VICTORY_JOIN_COPIES=1 VICTORY_INDIRECT_WINDOW=1
-VICTORY_INDIRECT_BATCH=2 VICTORY_NAN_SCRUB=1 VICTORY_TEXTURE_DROP_MIPS=1
+VICTORY_INDIRECT_BATCH=2 VICTORY_NAN_SCRUB=1 VICTORY_TEXTURE_DROP_MIPS=1 VICTORY_BAKE_SOURCES=full
 ```
 
 184 to 192 ms a frame (98 to 111 ms on the GPU, 65 to 67 ms preparing), 5.2 to 5.5 fps, about
@@ -72,10 +85,17 @@ at a time and does not show where the time of a normal run goes.
 - **Light in shadow.** The title's ray-tracing structure builder does not run on 32-lane cards, so
   every ray misses. `main` skips the passes that turn those misses into white haze and adds a
   stand-in ambient light (`VICTORY_AMBIENT`, from cool_fox). Rooms stay too dark.
-- **Skin.** The title composites characters' skin once while a scene loads. With
-  `VICTORY_BAKE_SOURCES=1` this card logs, in one run: 159 bake draws, 82 of them sampling a texture
-  that was not there yet, 443 sources still waiting, 123 skipped because the card had no room. On
-  4 GB that is structural.
+- **Skin.** The title composites characters' skin once while a scene loads, and on this card the
+  textures those draws sample are mostly not uploaded yet. `coolfox-4gb` in the boat scene, counting
+  only (`VICTORY_BAKE_SOURCES=count`): 107 bake draws, 104 of them sampling a texture that was not on
+  the card. With `VICTORY_BAKE_SOURCES=full` (UwUCammie's fork pull request #1264, ported to that
+  tree here): 111 bake draws, 0 sampling wrong, 106 textures uploaded ahead of them, 29 MB in all.
+  One run each; faces were right in both runs' captures, so the picture gain is not yet shown, only
+  the count. A black face seen in an earlier run of the same scene is what this is meant to end.
+- **Interiors and night.** With the ray-tracing resolve passes skipped, what is in shadow goes near
+  black (jasonc123456/victory-nvidia-fork's notes say the same: those passes also write the fallback
+  light). Making rays answer "no hit" instead (fxceless `96ff135`, `VICTORY_BVH_NO_HIT`) is not in
+  `coolfox-4gb` yet.
 - **Run-to-run variance.** Whether the player character is lit differs between identical runs (also
   reported on an RTX 5070 Ti in fork pull request #799). One run proves little; the numbers above
   are from one run each unless said.
@@ -124,6 +144,27 @@ worth nothing and costs background detail: leave it at the title's own there.
   refuses; the picture washed out in two runs with all four built, and not in either half.
 - Another project's 25 fps claim on a 16 GB card is 2.4 fps here (`coolfox-4gb`).
 
+## Contributing
+
+Pull requests and issues are welcome on this repository, against `coolfox-4gb` (the line that is
+played) or `main`. Small ones are merged fastest. What would help most, in order:
+
+1. **Interiors and night on 32-lane cards**: `VICTORY_BVH_NO_HIT` ported to `coolfox-4gb`; the
+   ambient stand-in settling by time instead of by frame (avatarmanz `b4ba4bb`, `9576c45`); traced
+   reflections clamped to the ambient estimate (avatarmanz pull request #314).
+2. **Card time**: the frame waits 100 to 150 ms for a 4 GB card. Which compute passes can be thinned
+   or run at lower resolution without losing the picture (fxceless issue #1278 names seven).
+3. **Memory**: the tree keeps 3,072 MB of the card for render targets
+   (`VICTORY_CARD_ROOM_FOR_TARGETS_MB`), and they hold about 1,350 MB here; a default that follows
+   the card (as bolado-dev/mandy-port's `55b3635` does) is untested here.
+4. **Measurements from other small cards** (4 to 6 GB, NVIDIA or AMD): frame time, the log's
+   one-second summary line, and what the picture does. Text and numbers.
+
+Rules: no game files, captures of the game, dumps or keys in issues, pull requests or commits; keep
+the authors of commits you bring from elsewhere (GPL-3.0-or-later) and say where they are from; say
+what you measured and on what, and what you did not test. Results that say "this did not help" are
+as welcome as fixes: several are listed above.
+
 ## Credits
 
 Everything here stands on other people's work, and the commits keep their authors.
@@ -139,6 +180,9 @@ Everything here stands on other people's work, and the commits keep their author
   Soderlund), #1002, #592, #156 (sedzz, with a commit by ryotdev), #799 (Massive-Adrian), #1261
   (Garu667); and, through `main` of the fork, #1260
   (LeonardoS11) and #1264 (UwUCammie).
+- UwUCammie: the skin-bake source upload (fork pull request #1264), ported to `coolfox-4gb`.
+- miaohaixiang1-netizen (cool-fox-12gb): `VICTORY_NAN_SCRUB` and `VICTORY_TEXTURE_DROP_MIPS` on
+  `coolfox-4gb`; the DoubleGhosty/cool_fox continuation, merged there.
 - HLVM04, atmacafuat and tippythetaidum for measurements and corrections in the fork's threads.
 
 Measured, merged and written with AI assistance (Claude Code and Codex) on the machine above.

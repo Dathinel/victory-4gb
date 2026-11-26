@@ -234,7 +234,7 @@ pub(crate) fn test_command_samples(key: &str) -> u64 {
 /// What a command's note is summed under: its pipeline (`[compute ...]`,
 /// `[mesh ..., pixel ...]`) with the command's first word, or without a
 /// pipeline its first two words.
-fn command_key(op: &str) -> String {
+pub(crate) fn command_key(op: &str) -> String {
     let head = op.split(" | ").next().unwrap_or(op);
     let word = head.split(' ').next().unwrap_or("");
     match (head.find('['), head.find(']')) {

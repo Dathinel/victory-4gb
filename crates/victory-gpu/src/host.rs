@@ -1035,6 +1035,12 @@ mod tests {
             list.note_op(|| label.to_owned());
             list.close();
         }
+        let long = host.new_list().unwrap();
+        let label = format!("dispatch 1x1x1 [compute {}tail]", "long-name".repeat(40));
+        long.note_op(|| label.clone());
+        long.close();
+        host.execute(&[&long]);
+        assert_eq!(crate::copystat::test_command_samples(&crate::copystat::command_key(&label)), 1);
         host.execute(&[&a, &b]);
         assert_eq!(crate::copystat::test_command_samples("first"), 1);
         assert_eq!(crate::copystat::test_command_samples("second"), 1);
@@ -6353,7 +6359,12 @@ impl HostList {
         let mut times: Vec<(f64, String)> = (0..count)
             .map(|i| {
                 let ticks = stamps[i + 1].saturating_sub(stamps[i]);
-                (ticks as f64 * 1e3 / frequency.max(1) as f64, notes[i].0.chars().take(300).collect())
+                let label = if batch_timing() {
+                    crate::copystat::command_key(&notes[i].0)
+                } else {
+                    notes[i].0.chars().take(300).collect()
+                };
+                (ticks as f64 * 1e3 / frequency.max(1) as f64, label)
             })
             .collect();
         if n != usize::MAX {

@@ -63,7 +63,7 @@ The set this card runs best with so far:
 VICTORY_LEVELS_ON_DEMAND=1 VICTORY_TEXTURE_NO_WAIT=1 VICTORY_AMBIENT=0.8 VICTORY_AMBIENT_AIR=1.5
 VICTORY_RELAY_COPY=1 VICTORY_CARD_REHASH_RUNS=1 VICTORY_JOIN_COPIES=1 VICTORY_INDIRECT_WINDOW=1
 VICTORY_INDIRECT_BATCH=2 VICTORY_NAN_SCRUB=1 VICTORY_TEXTURE_DROP_MIPS=1 VICTORY_BAKE_SOURCES=full
-VICTORY_UPSCALER=6 VICTORY_RENDER_SCALE=0.5
+VICTORY_UPSCALER=6 VICTORY_RENDER_SCALE=0.5 VICTORY_AMBIENT_SETTLE=250,3 VICTORY_AMBIENT_MARCH=3
 ```
 
 (with `VICTORY_SKIP_PIPELINES` set to the list in `scripts/rt_off_hashes.txt`.)
@@ -88,25 +88,19 @@ at a time and does not show where the time of a normal run goes.
 - **Light in shadow.** The title's ray-tracing structure builder does not run on 32-lane cards, so
   every ray misses. `main` skips the passes that turn those misses into white haze and adds a
   stand-in ambient light (`VICTORY_AMBIENT`, from cool_fox). Rooms stay too dark.
-- **Skin.** The title composites characters' skin once while a scene loads, and on this card the
-  textures those draws sample are mostly not uploaded yet. `coolfox-4gb` in the boat scene, counting
-  only (`VICTORY_BAKE_SOURCES=count`): 107 bake draws, 104 of them sampling a texture that was not on
-  the card. With `VICTORY_BAKE_SOURCES=full` (UwUCammie's fork pull request #1264, ported to that
-  tree here): 111 bake draws, 0 sampling wrong, 106 textures uploaded ahead of them, 29 MB in all.
-  One run each; faces were right in both runs' captures, so the picture gain is not yet shown, only
-  the count. A black face seen in an earlier run of the same scene is what this is meant to end.
-- **Interiors and night.** A green-brown fog veil lies over interiors, some characters' skin is
-  pure black, and night shows burned white edges. Six runs on `coolfox-4gb`, same opening montage,
-  captures every 10 s:
-  - ray-tracing resolves skipped (the list): veil; 5.2 to 7.0 fps;
-  - nothing skipped: veil, plus blocks of broken picture and a face of uninitialised pixels;
-  - `VICTORY_BVH_NO_HIT=1` (fxceless `96ff135`, picked onto `coolfox-4gb` here), nothing skipped:
-    **no veil in the first run, veil in the repeat** and in a third run with
-    `VICTORY_TEXTURE_NO_WAIT=0`; 4.1 to 5.7 fps;
-  - `VICTORY_BVH_NO_HIT=1` with the list: veil; 4.8 to 6.4 fps.
-  The one veil-free run was the first after a rebuild, with every shader translating again. So
-  none of these switches is shown to remove the veil, and what differed in that run is not known
-  yet. An earlier version of this README credited the switch; that was one run.
+- **Skin and late textures.** Some runs show a character's skin pure black, flat untextured
+  figures, a face of uninitialised pixels or flat water; others, same settings, show none of it. A
+  target dump of one black-skin frame has skin albedo 0 in the G-buffer (lips, eyes, hair and
+  clothes are there): the texture had no host copy on a full 4 GB card. `VICTORY_BAKE_SOURCES=full`
+  (UwUCammie's fork pull request #1264, ported here) takes bake draws sampling a missing texture
+  from 104 of 107 to 0 of 111, which is necessary and not enough. Issue #3 has what was tried.
+- **Interiors and night.** The green-brown fog veil over interiors is located and, in three runs
+  of three, gone with `VICTORY_AMBIENT_SETTLE=250,3 VICTORY_AMBIENT_MARCH=3` (pull request #15,
+  the measurements in issue #2). It travelled the title's ray-marched in-scatter, which nothing
+  bounded, and the stand-in's mean of the room lagged seconds behind every cut at 4 to 6 fps, so
+  identical runs came out veiled (about 7 in 10) or clean. Ray-tracing switches had nothing to do
+  with it: six runs of them are in issue #2. Still open: full-white captures while the first scene
+  loads (fewer, not gone), and interiors are clean but dark, since indirect light is still missing.
 - **Run-to-run variance.** Whether the player character is lit differs between identical runs (also
   reported on an RTX 5070 Ti in fork pull request #799). One run proves little; the numbers above
   are from one run each unless said.

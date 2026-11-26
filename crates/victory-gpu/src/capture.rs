@@ -116,7 +116,7 @@ static RING: std::sync::Mutex<std::collections::VecDeque<String>> =
 const RING_LINES: usize = 6000;
 
 /// Whether `VICTORY_CAPTURE_WORLD` is set.
-fn world_on() -> bool {
+pub(crate) fn world_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_CAPTURE_WORLD").is_some())
 }

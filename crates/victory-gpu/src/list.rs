@@ -2455,6 +2455,25 @@ static NEWER_THIN_FUNCTIONS: Table<160> = Table(thin::table(true));
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(windows, feature = "diagnostics"))]
+    #[test]
+    #[ignore = "requires VICTORY_GPU_TIMING=batch, deferred submission and D3D12"]
+    fn batch_timing_collects_deferred_lists() {
+        assert!(crate::host::late());
+        let host = crate::host::host().unwrap();
+        let mut lists = Vec::new();
+        for name in ["deferred-a", "deferred-b"] {
+            let list = host.new_list().unwrap();
+            list.note_op(|| name.to_owned());
+            list.close();
+            lists.push(super::Detached { host: list, _state: Default::default(), _uploads: Vec::new() });
+        }
+        host.execute_late(lists, vec![0, 1]);
+        crate::host::settle_for_fence();
+        assert_eq!(crate::copystat::test_command_samples("deferred-a"), 1);
+        assert_eq!(crate::copystat::test_command_samples("deferred-b"), 1);
+    }
+
     use super::*;
     use crate::object::slot;
 

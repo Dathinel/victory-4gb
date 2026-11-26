@@ -1050,11 +1050,25 @@ mod tests {
         assert_eq!(crate::copystat::test_command_samples("first"), 2);
         assert_eq!(crate::copystat::test_command_samples("second"), 1);
 
+        use crate::copystat::{C, peek};
+        let before = peek(C::TimingOverwritten);
         let fence = *host.submitted.lock().unwrap();
         host.collect_batch_times(fence, [&a, &a, &b].into_iter());
         assert_eq!(crate::copystat::test_command_samples("first"), 3);
         assert_eq!(crate::copystat::test_command_samples("second"), 2);
+        assert_eq!(peek(C::TimingOverwritten) - before, 1);
+        let unavailable = peek(C::TimingUnavailable);
         host.collect_batch_times(fence + 1, [&a].into_iter());
+        assert_eq!(peek(C::TimingUnavailable) - unavailable, 1);
+        let full = host.new_list().unwrap();
+        for _ in 0..STAMPS + 2 {
+            full.note_op(|| "overflow-test".to_owned());
+        }
+        full.close();
+        let truncated = peek(C::TimingTruncated);
+        host.execute(&[&full]);
+        assert_eq!(peek(C::TimingTruncated) - truncated, 3);
+        assert_eq!(crate::copystat::test_command_samples("overflow-test"), u64::from(STAMPS - 1));
         assert_eq!(crate::copystat::test_command_samples("first"), 3);
     }
 
@@ -5545,22 +5559,33 @@ impl Host {
 
     #[cfg(feature = "diagnostics")]
     fn collect_batch_times<'a>(&self, fence: u64, lists: impl Iterator<Item = &'a HostList>) {
+        use crate::copystat::{C, add};
         // SAFETY: queries of our queue and fence, without waiting for either.
         let completed = unsafe { self.fence.GetCompletedValue() };
-        if completed < fence || completed == u64::MAX {
-            return;
-        }
-        let Ok(frequency) = (unsafe { self.queue.GetTimestampFrequency() }) else { return };
-        if frequency == 0 {
-            return;
-        }
-        // Resubmitting a list overwrites its previous query results.
+        let frequency = if completed >= fence && completed != u64::MAX {
+            unsafe { self.queue.GetTimestampFrequency() }.ok().filter(|&v| v > 0)
+        } else {
+            None
+        };
         let mut seen = std::collections::HashSet::new();
         for list in lists {
-            if seen.insert(std::ptr::from_ref(list)) {
-                for (ms, op) in list.slowest(frequency, usize::MAX) {
-                    crate::copystat::command_took(&op, ms);
-                }
+            let notes = list.notes.lock().unwrap_or_else(|e| e.into_inner()).len();
+            let Some(frequency) = frequency else {
+                add(C::TimingUnavailable, notes as u64);
+                continue;
+            };
+            // A list's query buffer contains only its last execution.
+            if !seen.insert(std::ptr::from_ref(list)) {
+                add(C::TimingOverwritten, notes as u64);
+                continue;
+            }
+            let count = notes.min((STAMPS - 1) as usize);
+            let times = list.slowest(frequency, usize::MAX);
+            add(C::TimingTruncated, (notes - count) as u64);
+            add(C::TimingMeasured, times.len() as u64);
+            add(C::TimingUnavailable, (count - times.len()) as u64);
+            for (ms, op) in times {
+                crate::copystat::command_took(&op, ms);
             }
         }
     }

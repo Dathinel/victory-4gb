@@ -63,8 +63,10 @@ The set this card runs best with so far:
 VICTORY_LEVELS_ON_DEMAND=1 VICTORY_TEXTURE_NO_WAIT=1 VICTORY_AMBIENT=0.8 VICTORY_AMBIENT_AIR=1.5
 VICTORY_RELAY_COPY=1 VICTORY_CARD_REHASH_RUNS=1 VICTORY_JOIN_COPIES=1 VICTORY_INDIRECT_WINDOW=1
 VICTORY_INDIRECT_BATCH=2 VICTORY_NAN_SCRUB=1 VICTORY_TEXTURE_DROP_MIPS=1 VICTORY_BAKE_SOURCES=full
-VICTORY_UPSCALER=6 VICTORY_RENDER_SCALE=0.5
+VICTORY_UPSCALER=6 VICTORY_RENDER_SCALE=0.5 VICTORY_BVH_NO_HIT=1
 ```
+
+(without `VICTORY_SKIP_PIPELINES`: see "Interiors and night" below.)
 
 184 to 192 ms a frame (98 to 111 ms on the GPU, 65 to 67 ms preparing), 5.2 to 5.5 fps, about
 3,350 of 3,300 MB of card memory budgeted, no banding from the dropped texture level
@@ -93,10 +95,18 @@ at a time and does not show where the time of a normal run goes.
   tree here): 111 bake draws, 0 sampling wrong, 106 textures uploaded ahead of them, 29 MB in all.
   One run each; faces were right in both runs' captures, so the picture gain is not yet shown, only
   the count. A black face seen in an earlier run of the same scene is what this is meant to end.
-- **Interiors and night.** With the ray-tracing resolve passes skipped, what is in shadow goes near
-  black (jasonc123456/victory-nvidia-fork's notes say the same: those passes also write the fallback
-  light). Making rays answer "no hit" instead (fxceless `96ff135`, `VICTORY_BVH_NO_HIT`) is not in
-  `coolfox-4gb` yet.
+- **Interiors and night.** Four one-run variants on `coolfox-4gb`, same opening montage and boat
+  scene, captures every 10 s:
+  - ray-tracing resolves skipped (the list): a green-brown fog veil over interiors, one character's
+    skin pure black, burned white edges at night; 5.2 to 7.0 fps;
+  - nothing skipped, rays walking a structure that was never built: the veil again, blocks of
+    broken picture, a face of uninitialised pixels; 3.6 to 6.2 fps;
+  - **`VICTORY_BVH_NO_HIT=1`, nothing skipped** (fxceless `96ff135`, picked onto `coolfox-4gb`
+    here): the veil is gone, that character's skin is there, night is dark but clean. Daylight
+    shade is harder and water loses its sky reflection. 4.1 to 5.7 fps. This is the set now;
+  - `VICTORY_BVH_NO_HIT=1` with the list: the veil is back (so the veil is the skipped resolves),
+    4.8 to 6.4 fps.
+  Indirect light itself is still missing: rooms are dark, not lit.
 - **Run-to-run variance.** Whether the player character is lit differs between identical runs (also
   reported on an RTX 5070 Ti in fork pull request #799). One run proves little; the numbers above
   are from one run each unless said.
@@ -161,7 +171,9 @@ matters. Same boat scene, one run each, against 4.4 to 4.5 fps (140 to 147 ms on
 Pull requests and issues are welcome on this repository, against `coolfox-4gb` (the line that is
 played) or `main`. Small ones are merged fastest. What would help most, in order:
 
-1. **Interiors and night on 32-lane cards**: `VICTORY_BVH_NO_HIT` ported to `coolfox-4gb`; the
+1. **Interiors and night on 32-lane cards**: an indirect-light stand-in for rooms now that rays
+   miss cleanly; skin that reads the probe atlas only traced passes fill (Linox-IDK/LNX-victory
+   `0f9a071` fills it with the ambient value); the
    ambient stand-in settling by time instead of by frame (avatarmanz `b4ba4bb`, `9576c45`); traced
    reflections clamped to the ambient estimate (avatarmanz pull request #314).
 2. **Card time**: the frame waits 100 to 150 ms for a 4 GB card. Which compute passes can be thinned

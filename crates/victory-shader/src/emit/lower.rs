@@ -570,6 +570,22 @@ fn lane_uniform(p: &Program, st: &Structured, all: &[bool], ordered_lds: bool) -
             if st.guards[b][i].is_some() {
                 continue; // lanes outside EXEC keep another value
             }
+            if name == "v_swap_b32" {
+                if let Fields::Valu(v) = &inst.fields
+                    && v.dpp.is_none() && v.sdwa.is_none()
+                    && let (Some(Operand::Vector { reg: dst, .. }), Some(&Operand::Vector { reg: src, .. })) =
+                        (v.dst, v.src.first())
+                {
+                    for (out, input) in [(dst, src), (src, dst)] {
+                        if inst.read(Reg::V(input)).is_some_and(|x| same.contains(&x))
+                            && let Some(value) = inst.write(Reg::V(out))
+                        {
+                            same.insert(value);
+                        }
+                    }
+                }
+                continue;
+            }
             let ops: Vec<Operand> = match &inst.fields {
                 Fields::Valu(v)
                     if v.dpp.is_none()
@@ -12883,6 +12899,31 @@ mod tests {
     use crate::{io, ir, resource, structure};
 
     const S_ENDPGM: u32 = 0xBF81_0000;
+
+    #[test]
+    fn swap_tracks_uniformity_for_each_result() {
+        use super::{Reg, all_lane_blocks, lane_uniform};
+
+        for (dst, src) in [(5u8, 6u8), (6, 5)] {
+            for (dst_uniform, src_uniform) in [(false, true), (true, false), (true, true), (false, false)] {
+                let mov = |reg: u8, uniform| {
+                    0x7E00_0200 | (u32::from(reg) << 17) | if uniform { 170 } else { 256 }
+                };
+                let swap = 0x7E00_CB00 | (u32::from(dst) << 17) | u32::from(src);
+                let code: Vec<_> = [mov(dst, dst_uniform), mov(src, src_uniform), swap, S_ENDPGM]
+                    .into_iter().flat_map(u32::to_le_bytes).collect();
+                let p = ir::build(&code, true, 8).unwrap();
+                let st = structure::structure(&p).unwrap();
+                let same = lane_uniform(&p, &st, &all_lane_blocks(&st).unwrap(), false);
+                let inst = &p.blocks[0].insts[2];
+                assert_eq!(inst.name(), "v_swap_b32");
+                for (reg, expected) in [(dst, src_uniform), (src, dst_uniform)] {
+                    assert_eq!(same.contains(&inst.write(Reg::V(reg)).unwrap()), expected,
+                        "swap v{dst}, v{src}, inputs {dst_uniform}/{src_uniform}, result v{reg}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn packed_pixel_inputs_find_their_second_row() {

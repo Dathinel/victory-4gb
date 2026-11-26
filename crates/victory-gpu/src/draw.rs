@@ -3625,6 +3625,18 @@ impl State {
             .filter(|s| s.shader.skin)
             .find_map(|s| Some((read(s, SKIN_ATLAS)?, read(s, SKIN_LAYERS)?)))
         else {
+            // Said once: a skin-named draw whose probe images are not where
+            // the fill looks (another profile or build of the title).
+            if let Some(s) = p.stages.iter().find(|s| s.shader.skin) {
+                static SAID: std::sync::Once = std::sync::Once::new();
+                SAID.call_once(|| {
+                    tracing::warn!(
+                        atlas = read(s, SKIN_ATLAS).is_some(),
+                        layers = read(s, SKIN_LAYERS).is_some(),
+                        "skin: a draw named for skin does not read both probe images where the fill looks"
+                    );
+                });
+            }
             return false;
         };
         let frame = crate::queue::presented();

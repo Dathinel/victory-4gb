@@ -491,11 +491,12 @@ struct Pass {
     gather: ID3D12PipelineState,
     raise: ID3D12PipelineState,
     air: ID3D12PipelineState,
-    fill: ID3D12PipelineState,
-    fill_volume: ID3D12PipelineState,
+    /// Skin's fill (`VICTORY_SKIN_FILL`): its two programs and its views,
+    /// made only with the switch on, and apart: a failure here leaves the
+    /// stand-in itself standing.
+    fill: Option<(ID3D12PipelineState, ID3D12PipelineState, ID3D12DescriptorHeap)>,
     cells: ID3D12Resource,
     points: ID3D12Resource,
-    views: ID3D12DescriptorHeap,
     step: u32,
     next: AtomicU32,
 }
@@ -539,18 +540,24 @@ fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -
     let gather = pipeline("GATHER", s!("gather"))?;
     let raise = pipeline("RAISE", s!("raise"))?;
     let air = pipeline("AIR", s!("clear_air"))?;
-    let fill = pipeline("FILL", s!("fill"))?;
-    let fill_volume = pipeline("FILL\n#define VOLUME", s!("fill"))?;
     let kind = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    // SAFETY: plain heap creation.
-    let views: ID3D12DescriptorHeap = unsafe {
-        device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
-            Type: kind,
-            NumDescriptors: FILL_VIEWS,
-            Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
-            NodeMask: 0,
-        })?
-    };
+    let fill = skin_fill()
+        .then(|| -> windows::core::Result<_> {
+            let fill = pipeline("FILL", s!("fill"))?;
+            let volume = pipeline("FILL
+#define VOLUME", s!("fill"))?;
+            // SAFETY: plain heap creation.
+            let views: ID3D12DescriptorHeap = unsafe {
+                device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                    Type: kind,
+                    NumDescriptors: FILL_VIEWS,
+                    Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                    NodeMask: 0,
+                })?
+            };
+            Ok((fill, volume, views))
+        })
+        .and_then(|made| made.inspect_err(|e| tracing::warn!(error = %e, "skin: no fill of its probe images")).ok());
     let made = |bytes| buffer(bytes).ok_or_else(windows::core::Error::empty);
     Ok(Pass {
         root: root.ok_or_else(windows::core::Error::empty)?,
@@ -561,12 +568,10 @@ fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -
         raise,
         air,
         fill,
-        fill_volume,
         cells: made(CELL_BYTES)?,
         points: made(POINT_BYTES)?,
         // SAFETY: a plain query.
         step: unsafe { device.GetDescriptorHandleIncrementSize(kind) },
-        views,
         next: AtomicU32::new(0),
     })
 }
@@ -693,6 +698,9 @@ pub(crate) fn fill(list: &HostList, image: This, first_only: bool) -> bool {
     let (Some(pass), Some(host)) = (pass(), host()) else {
         return false;
     };
+    let Some((flat, deep, views)) = &pass.fill else {
+        return false;
+    };
     let (level, constant) = match set() {
         Set::Off => return false,
         Set::Estimate(level) => (level, 0.0f32),
@@ -751,19 +759,19 @@ pub(crate) fn fill(list: &HostList, image: This, first_only: bool) -> bool {
     // keeps, in the unordered-access state; buffers the list keeps.
     unsafe {
         let cpu = D3D12_CPU_DESCRIPTOR_HANDLE {
-            ptr: pass.views.GetCPUDescriptorHandleForHeapStart().ptr + (slot * pass.step) as usize,
+            ptr: views.GetCPUDescriptorHandleForHeapStart().ptr + (slot * pass.step) as usize,
         };
         let gpu = D3D12_GPU_DESCRIPTOR_HANDLE {
-            ptr: pass.views.GetGPUDescriptorHandleForHeapStart().ptr + u64::from(slot * pass.step),
+            ptr: views.GetGPUDescriptorHandleForHeapStart().ptr + u64::from(slot * pass.step),
         };
         host.device.CreateUnorderedAccessView(texture, None::<&ID3D12Resource>, Some(&view), cpu);
-        l.SetDescriptorHeaps(&[Some(pass.views.clone())]);
+        l.SetDescriptorHeaps(&[Some(views.clone())]);
         l.SetComputeRootSignature(&pass.root);
         l.SetComputeRoot32BitConstants(0, 12, words.as_ptr().cast(), 0);
         l.SetComputeRootDescriptorTable(2, gpu);
         l.SetComputeRootUnorderedAccessView(3, pass.cells.GetGPUVirtualAddress());
         l.SetComputeRootUnorderedAccessView(4, pass.points.GetGPUVirtualAddress());
-        l.SetPipelineState(if volume { &pass.fill_volume } else { &pass.fill });
+        l.SetPipelineState(if volume { deep } else { flat });
         l.Dispatch((d.Width as u32).div_ceil(8), d.Height.div_ceil(8), layers);
     }
     uav_barrier(l);

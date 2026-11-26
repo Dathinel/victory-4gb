@@ -1637,6 +1637,13 @@ impl State {
             // Its geometry stage would turn each triangle into a rectangle.
             once!("a rectangle pipeline drawn with another topology");
         }
+        // Skin reads probe images only rays fill: the stand-in's light goes
+        // there first, and the list has our heap, root signature and pipeline.
+        if crate::ambient::skin_fill() && crate::ambient::on() && self.skin(list, p) {
+            self.host_pipeline = 0;
+            self.host_roots = [0; 2];
+            self.host_heaps_set = false;
+        }
         if !self.bind(list, p, false) {
             return false;
         }
@@ -3592,10 +3599,68 @@ impl State {
         }
     }
 
+    /// The stand-in's light in the probe images a skin draw of `p` reads
+    /// (`crate::ambient::SKIN_ATLAS`, `SKIN_LAYERS`), once a frame for each.
+    /// Whether it recorded anything.
+    fn skin(&self, list: &HostList, p: &HostPipeline) -> bool {
+        use crate::ambient::{SKIN_ATLAS, SKIN_LAYERS};
+        static FILLED: std::sync::Mutex<(u64, Vec<usize>)> = std::sync::Mutex::new((u64::MAX, Vec::new()));
+        // The image a stage reads at a place of a table.
+        let read = |s: &crate::pipeline::host::Stage, (slot, offset): (u8, u32)| -> Option<usize> {
+            s.translated().used.iter().find(|u| {
+                u.kind == ResourceType::Srv && u.root == RootType::Table && (u.slot, u.table_offset_dwords) == (slot, offset)
+            })?;
+            let Some(Root::Table(table)) = self.roots_ref(false).get(usize::from(slot)) else {
+                return None;
+            };
+            match crate::descriptor::view(table + u64::from(offset) * 4)? {
+                View::Shader(r, _) if r != 0 => Some(r),
+                _ => None,
+            }
+        };
+        // Named for skin and reading both: its screen-space passes are not.
+        let Some((atlas, layers)) = p
+            .stages
+            .iter()
+            .filter(|s| s.shader.skin)
+            .find_map(|s| Some((read(s, SKIN_ATLAS)?, read(s, SKIN_LAYERS)?)))
+        else {
+            return false;
+        };
+        let frame = crate::queue::presented();
+        let mut filled = FILLED.lock().unwrap_or_else(|e| e.into_inner());
+        if filled.0 != frame {
+            *filled = (frame, Vec::new());
+        }
+        let mut any = false;
+        for (image, first_only) in [(layers, crate::ambient::skin_layers()), (atlas, Some(false))] {
+            if let Some(first_only) = first_only
+                && !filled.1.contains(&image)
+            {
+                filled.1.push(image);
+                any |= crate::ambient::fill(list, image as This, first_only);
+            }
+        }
+        any
+    }
+
     /// The stand-in for the indirect light after a dispatch of `p`
     /// (`crate::ambient`). Whether it recorded anything.
     fn ambient(&self, list: &HostList, p: &HostPipeline, role: crate::ambient::Role) -> bool {
-        use crate::ambient::{AIR, DEPTH, LIGHT, RADIANCE, Role, Views};
+        use crate::ambient::{AIR, LIGHT, RADIANCE, Role};
+        match role {
+            // Every image of the resolve that is named (`VICTORY_AMBIENT_SLOTS`).
+            Role::Resolve => crate::ambient::light_slots()
+                .iter()
+                .fold(false, |any, &offset| self.ambient_at(list, p, role, (LIGHT.0, offset)) | any),
+            Role::Radiance => self.ambient_at(list, p, role, RADIANCE),
+            Role::Air => self.ambient_at(list, p, role, AIR),
+        }
+    }
+
+    /// [`State::ambient`] for the image at `at`.
+    fn ambient_at(&self, list: &HostList, p: &HostPipeline, role: crate::ambient::Role, at: (u8, u32)) -> bool {
+        use crate::ambient::{DEPTH, Role, Views};
         let Some(t) = p.stages.first().map(|s| s.translated()) else {
             return false;
         };
@@ -3622,11 +3687,6 @@ impl State {
             // SAFETY: a live resource.
             let desc = unsafe { host.GetDesc() };
             Some((desc, heap.gpu_handle((start + offset * 4) / 32)))
-        };
-        let at = match role {
-            Role::Resolve => LIGHT,
-            Role::Radiance => RADIANCE,
-            Role::Air => AIR,
         };
         let image = entry(ResourceType::Uav, at);
         let depth = match role {

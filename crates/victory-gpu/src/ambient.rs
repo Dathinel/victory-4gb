@@ -33,13 +33,30 @@
 //! The air of a room is lit by the same probes: without rays they hold the
 //! sky's light indoors too, a brown veil at sunset. `VICTORY_AMBIENT_AIR`
 //! bounds what the air scatters by a multiple of the light around.
+//!
+//! Skin (the `..._SSS` lighting shaders) reads the screen probes' radiance
+//! atlas and their array of layers itself, and only the traced passes fill
+//! those: black skin with every other surface lit. `VICTORY_SKIN_FILL=1`
+//! puts one value in both before a frame's first skin draw: the constant,
+//! or the share of the slow mean (Linox-IDK's find, LNX-victory 0f9a071,
+//! GPL-3.0; places seen on the Series S profile).
+//! `VICTORY_SKIN_LAYERS=first|all|off`: the first layer alone and 0 in the
+//! others (the default: a harmonic set's constant term), every layer, or
+//! the array left as it is. `VICTORY_SKIN_WIDE=1`: for `SKIN`-named
+//! materials too (the player's; they came out see-through there).
+//!
+//! `VICTORY_AMBIENT_SLOTS=152,160,...`: the places in its table of the
+//! images the resolve's light is raised in (176 alone when unset; it writes
+//! six such, at 152, 160, 168, 176, 184 and 200).
 
+use std::sync::atomic::AtomicU32;
 use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::core::s;
 
 use crate::host::{HostList, host};
+use crate::object::This;
 
 /// Programs of the title the stand-in follows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -75,6 +92,49 @@ pub(crate) const DEPTH: (u8, u32) = (0, 464);
 pub(crate) const RADIANCE: (u8, u32) = (1, 16);
 /// Where the light the air scatters is.
 pub(crate) const AIR: (u8, u32) = (1, 32);
+/// Where a skin lighting shader reads the probes' radiance atlas (R32_UINT,
+/// 7680x90 on Series S) and their 13 layers (R32_UINT, 160x90x13 there).
+pub(crate) const SKIN_ATLAS: (u8, u32) = (0, 968);
+pub(crate) const SKIN_LAYERS: (u8, u32) = (1, 80);
+
+fn slots(set: &str) -> Vec<u32> {
+    let named: Vec<u32> = set.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+    if named.is_empty() { vec![LIGHT.1] } else { named }
+}
+
+/// The places in [`LIGHT`]'s table of the images the resolve's light is
+/// raised in (`VICTORY_AMBIENT_SLOTS`).
+pub(crate) fn light_slots() -> &'static [u32] {
+    static SLOTS: OnceLock<Vec<u32>> = OnceLock::new();
+    SLOTS.get_or_init(|| slots(&std::env::var("VICTORY_AMBIENT_SLOTS").unwrap_or_default()))
+}
+
+/// `VICTORY_SKIN_FILL=1`: skin's probe images get the stand-in's light.
+pub(crate) fn skin_fill() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SKIN_FILL").is_some_and(|v| v != "0"))
+}
+
+/// `VICTORY_SKIN_LAYERS`: whether the first layer alone is lit, or `None`
+/// when the layers are left.
+pub(crate) fn skin_layers() -> Option<bool> {
+    static MODE: OnceLock<Option<bool>> = OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("VICTORY_SKIN_LAYERS").unwrap_or_default().trim() {
+        "off" => None,
+        "all" => Some(false),
+        _ => Some(true),
+    })
+}
+
+fn skin_named(container: &[u8], wide: bool) -> bool {
+    let has = |name: &[u8]| container.windows(name.len()).any(|w| w == name);
+    has(b"MATERIAL_SHEEN_ANISOTROPY_SSS") || (wide && has(b"SKIN"))
+}
+
+/// Whether a shader is named for skin, with the fill on (else none is).
+pub(crate) fn skin(container: &[u8]) -> bool {
+    skin_fill() && skin_named(container, std::env::var_os("VICTORY_SKIN_WIDE").is_some_and(|v| v == "1"))
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Set {
@@ -137,7 +197,7 @@ const SOURCE: &str = r#"
 cbuffer Set : register(b0) {
     float level; float constant; float strength; float radius;
     float near; float tan_y; uint width; uint height;
-    float follow; float most; float air; float unused;
+    float follow; float most; float air; float first_only;
 };
 Texture2D<float> depth : register(t0);
 // Cells: the light they send out (then, at CELLS, the slow mean), from
@@ -250,8 +310,7 @@ void clear_air(uint3 at : SV_DispatchThreadID) {
 }
 #endif
 
-#ifdef RAISE
-RWTexture2D<uint> light : register(u0);
+#if defined(RAISE) || defined(FILL)
 float3 unpack(uint v) {
     return float3(v & 511, (v >> 9) & 511, (v >> 18) & 511) * exp2(float(v >> 27) - 24.0);
 }
@@ -264,6 +323,29 @@ uint pack(float3 c) {
     uint3 m = min(uint3(c * scale + 0.5), 511u);
     return m.r | (m.g << 9) | (m.b << 18) | (uint(e) << 27);
 }
+#endif
+
+#ifdef FILL
+#ifdef VOLUME
+RWTexture3D<uint> filled : register(u0);
+#else
+RWTexture2DArray<uint> filled : register(u0);
+#endif
+// One value everywhere, or in the first layer alone and 0 in the others:
+// the constant, or the share of the slow mean.
+[RootSignature(RS)]
+[numthreads(8, 8, 1)]
+void fill(uint3 at : SV_DispatchThreadID) {
+    uint w, h, n;
+    filled.GetDimensions(w, h, n);
+    if (at.x >= w || at.y >= h || at.z >= n) return;
+    float3 c = constant > 0.0 ? float3(1.0, 0.98, 0.94) * constant : cells[CELLS].rgb * level;
+    filled[at] = (first_only > 0.0 && at.z > 0) ? 0u : pack(c);
+}
+#endif
+
+#ifdef RAISE
+RWTexture2D<uint> light : register(u0);
 [RootSignature(RS)]
 [numthreads(8, 8, 1)]
 void raise(uint3 at : SV_DispatchThreadID) {
@@ -337,6 +419,10 @@ void raise(uint3 at : SV_DispatchThreadID) {
 const CELLS: u64 = 64 * 36;
 const CELL_BYTES: u64 = (2 * CELLS + 1) * 16;
 const POINT_BYTES: u64 = 160 * 90 * 48;
+/// Views of what [`fill`] writes, a ring.
+/// shortcut: a view must last until its list has run; with a few fills a
+/// frame the ring is far from coming round.
+const FILL_VIEWS: u32 = 64;
 
 struct Pass {
     root: ID3D12RootSignature,
@@ -346,8 +432,13 @@ struct Pass {
     gather: ID3D12PipelineState,
     raise: ID3D12PipelineState,
     air: ID3D12PipelineState,
+    fill: ID3D12PipelineState,
+    fill_volume: ID3D12PipelineState,
     cells: ID3D12Resource,
     points: ID3D12Resource,
+    views: ID3D12DescriptorHeap,
+    step: u32,
+    next: AtomicU32,
 }
 // SAFETY: D3D12 objects are free-threaded.
 unsafe impl Send for Pass {}
@@ -389,6 +480,18 @@ fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -
     let gather = pipeline("GATHER", s!("gather"))?;
     let raise = pipeline("RAISE", s!("raise"))?;
     let air = pipeline("AIR", s!("clear_air"))?;
+    let fill = pipeline("FILL", s!("fill"))?;
+    let fill_volume = pipeline("FILL\n#define VOLUME", s!("fill"))?;
+    let kind = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    // SAFETY: plain heap creation.
+    let views: ID3D12DescriptorHeap = unsafe {
+        device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+            Type: kind,
+            NumDescriptors: FILL_VIEWS,
+            Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            NodeMask: 0,
+        })?
+    };
     let made = |bytes| buffer(bytes).ok_or_else(windows::core::Error::empty);
     Ok(Pass {
         root: root.ok_or_else(windows::core::Error::empty)?,
@@ -398,8 +501,14 @@ fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -
         gather,
         raise,
         air,
+        fill,
+        fill_volume,
         cells: made(CELL_BYTES)?,
         points: made(POINT_BYTES)?,
+        // SAFETY: a plain query.
+        step: unsafe { device.GetDescriptorHandleIncrementSize(kind) },
+        views,
+        next: AtomicU32::new(0),
     })
 }
 
@@ -511,6 +620,100 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     true
 }
 
+/// One value in every texel of `image` (a texture a draw is about to read:
+/// to unordered access, filled, back), or in its first layer alone and 0 in
+/// the others: the constant, or the share of the slow mean. Sets the list's
+/// view heap and replaces its compute root signature and pipeline; false if
+/// it recorded nothing.
+pub(crate) fn fill(list: &HostList, image: This, first_only: bool) -> bool {
+    use std::sync::atomic::Ordering;
+    let (Some(pass), Some(host)) = (pass(), host()) else {
+        return false;
+    };
+    let (level, constant) = match set() {
+        Set::Off => return false,
+        Set::Estimate(level) => (level, 0.0f32),
+        Set::Constant(level) => (0.0, level),
+    };
+    if constant == 0.0 && !KEPT.load(Ordering::Relaxed) {
+        return false;
+    }
+    let Some(texture) = crate::resource::host_resource(image) else {
+        return false;
+    };
+    // SAFETY: a live resource.
+    let d = unsafe { texture.GetDesc() };
+    // (R32_UINT holding R9G9B9E5.)
+    if d.Format.0 != 42 || d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0 {
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| {
+            tracing::warn!(format = d.Format.0, flags = d.Flags.0, width = d.Width, "skin: a probe image that cannot be filled");
+        });
+        return false;
+    }
+    let volume = d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    let layers = u32::from(d.DepthOrArraySize);
+    let view = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+        Format: d.Format,
+        ViewDimension: if volume { D3D12_UAV_DIMENSION_TEXTURE3D } else { D3D12_UAV_DIMENSION_TEXTURE2DARRAY },
+        Anonymous: if volume {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Texture3D: D3D12_TEX3D_UAV { MipSlice: 0, FirstWSlice: 0, WSize: layers },
+            }
+        } else {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Texture2DArray: D3D12_TEX2D_ARRAY_UAV {
+                    MipSlice: 0,
+                    FirstArraySlice: 0,
+                    ArraySize: layers,
+                    PlaneSlice: 0,
+                },
+            }
+        },
+    };
+    const WRITTEN: u32 = D3D12_RESOURCE_STATE_UNORDERED_ACCESS.0 as u32;
+    const READ: u32 =
+        (D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0 | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0) as u32;
+    crate::list::ensure_state(list, image, WRITTEN);
+    list.keep(texture);
+    list.keep(&pass.cells);
+    list.keep(&pass.points);
+    let slot = pass.next.fetch_add(1, Ordering::Relaxed) % FILL_VIEWS;
+    let mut words = [0u32; 12];
+    words[0] = level.to_bits();
+    words[1] = constant.to_bits();
+    words[11] = f32::from(u8::from(first_only)).to_bits();
+    let l = &list.list;
+    // SAFETY: an open list; a slot of our heap; a live texture the list
+    // keeps, in the unordered-access state; buffers the list keeps.
+    unsafe {
+        let cpu = D3D12_CPU_DESCRIPTOR_HANDLE {
+            ptr: pass.views.GetCPUDescriptorHandleForHeapStart().ptr + (slot * pass.step) as usize,
+        };
+        let gpu = D3D12_GPU_DESCRIPTOR_HANDLE {
+            ptr: pass.views.GetGPUDescriptorHandleForHeapStart().ptr + u64::from(slot * pass.step),
+        };
+        host.device.CreateUnorderedAccessView(texture, None::<&ID3D12Resource>, Some(&view), cpu);
+        l.SetDescriptorHeaps(&[Some(pass.views.clone())]);
+        l.SetComputeRootSignature(&pass.root);
+        l.SetComputeRoot32BitConstants(0, 12, words.as_ptr().cast(), 0);
+        l.SetComputeRootDescriptorTable(2, gpu);
+        l.SetComputeRootUnorderedAccessView(3, pass.cells.GetGPUVirtualAddress());
+        l.SetComputeRootUnorderedAccessView(4, pass.points.GetGPUVirtualAddress());
+        l.SetPipelineState(if volume { &pass.fill_volume } else { &pass.fill });
+        l.Dispatch((d.Width as u32).div_ceil(8), d.Height.div_ceil(8), layers);
+    }
+    uav_barrier(l);
+    crate::list::ensure_state(list, image, READ);
+    static TOLD: Mutex<u32> = Mutex::new(0);
+    let mut said = TOLD.lock().unwrap_or_else(|e| e.into_inner());
+    if *said < 4 {
+        *said += 1;
+        tracing::info!(width = d.Width, height = d.Height, layers, volume, first_only, "skin: a probe image gets the stand-in's light");
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +726,15 @@ mod tests {
         assert_eq!(parse("0.8"), Set::Estimate(0.8));
         assert_eq!(parse("constant:0.3"), Set::Constant(0.3));
         assert_eq!(parse("constant:nan"), Set::Off);
+    }
+
+    #[test]
+    fn skin_settings() {
+        assert_eq!(slots(""), [176]);
+        assert_eq!(slots("152, 160,x"), [152, 160]);
+        assert!(skin_named(b"..PS_MATERIAL_SHEEN_ANISOTROPY_SSS_1234..", false));
+        assert!(!skin_named(b"..PS_PLAYER_SKIN_1234..", false));
+        assert!(skin_named(b"..PS_PLAYER_SKIN_1234..", true));
     }
 
     #[test]

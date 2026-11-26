@@ -159,6 +159,10 @@ fork's constant.
 | `VICTORY_AMBIENT=constant:<level>` | the same light everywhere |
 | `VICTORY_AMBIENT_SHADE=<strength>,<metres>` | the creases (1,0.6) |
 | `VICTORY_AMBIENT_AIR=<multiple>` | what the air scatters is bounded by a multiple of the light around (off: the brown veil in the day room stays with it, light-14) |
+| `VICTORY_SKIN_FILL=1` | with the stand-in on: the probes' radiance atlas and 13 layers that skin (`_SSS`) shaders read get its light before a frame's first skin draw (from Linox-IDK/LNX-victory 0f9a071; places seen on the Series S profile; off by default) |
+| `VICTORY_SKIN_LAYERS=first\|all\|off` | which of the 13 layers get it: the first and 0 in the others (default), all (lit NPC faces there), none |
+| `VICTORY_SKIN_WIDE=1` | for `SKIN`-named materials too (the player's; see-through there) |
+| `VICTORY_AMBIENT_SLOTS=152,160,...` | the places of the resolve's images the light is raised in (176 alone) |
 
 It is off while the builder runs.
 

@@ -92,7 +92,7 @@ fn guest(threads: u32) -> NativeProgram {
     // opposite half. The guest needs ordering within its wave without s_barrier.
     words.extend([
         alu(0x1A, 10, k(2), 0),
-        alu(0x1D, 14, k(if threads % 64 != 0 { 8 } else { 32 }), 0),
+        alu(0x1D, 14, k(if !threads.is_multiple_of(64) { 8 } else { 32 }), 0),
         alu(0x1A, 14, k(2), 14),
     ]);
     let counter_bytes = (threads.div_ceil(64) * 4).max(8);
@@ -183,7 +183,7 @@ fn oracle(threads: u32, thread: u32) -> [u32; OUTPUTS] {
             [20, 36][(wave & 1) as usize]
         }),
         wave_total(if threads > 64 { wave ^ 1 } else { wave }),
-        lane_sum(lane ^ if threads % 64 != 0 { 8 } else { 32 }),
+        lane_sum(lane ^ if !threads.is_multiple_of(64) { 8 } else { 32 }),
         thread,
     ]
 }

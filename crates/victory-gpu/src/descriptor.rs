@@ -882,14 +882,17 @@ static VIEWS: std::sync::RwLock<Views> = std::sync::RwLock::new(Views {
 /// minutes and the frame rate fell by half. A descriptor names the view it
 /// was written with for a frame or a few, so the oldest of a million are
 /// long out of use; one naming a freed entry reads as stale (no view).
-/// `VICTORY_OWNERLESS_VIEWS=<n>` keeps `n` (0: all, as before).
+/// `VICTORY_OWNERLESS_VIEWS=<n>` keeps `n`; unset or 0 keeps all, as before:
+/// the oldest entry is dropped even when the title has just written the same
+/// view again (it keeps its place in the line), so a view in use can go stale
+/// under a small cap. Off here until writing it again moves it to the back.
 fn ownerless_cap() -> usize {
     static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CAP.get_or_init(|| {
         std::env::var("VICTORY_OWNERLESS_VIEWS")
             .ok()
             .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(1 << 20)
+            .unwrap_or(0)
     })
 }
 const VIEW_TAG: u32 = u32::from_le_bytes(*b"vVIE");

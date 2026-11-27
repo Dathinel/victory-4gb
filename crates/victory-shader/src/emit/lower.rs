@@ -570,6 +570,22 @@ fn lane_uniform(p: &Program, st: &Structured, all: &[bool], ordered_lds: bool) -
             if st.guards[b][i].is_some() {
                 continue; // lanes outside EXEC keep another value
             }
+            if name == "v_swap_b32" {
+                if let Fields::Valu(v) = &inst.fields
+                    && v.dpp.is_none() && v.sdwa.is_none()
+                    && let (Some(Operand::Vector { reg: dst, .. }), Some(&Operand::Vector { reg: src, .. })) =
+                        (v.dst, v.src.first())
+                {
+                    for (out, input) in [(dst, src), (src, dst)] {
+                        if inst.read(Reg::V(input)).is_some_and(|x| same.contains(&x))
+                            && let Some(value) = inst.write(Reg::V(out))
+                        {
+                            same.insert(value);
+                        }
+                    }
+                }
+                continue;
+            }
             let ops: Vec<Operand> = match &inst.fields {
                 Fields::Valu(v)
                     if v.dpp.is_none()
@@ -1444,10 +1460,10 @@ impl<'a> Lower<'a> {
             let one_wave = group <= wave;
             // A host whose waves are at most 32 lanes (NVIDIA) refuses `WaveSize(64)`. A console
             // wave64 program whose cross-lane code stays inside 32-lane halves – DPP rows,
-            // `ds_swizzle`, `v_permlane16` / `v_permlanex16`, which the ISA confines there – runs
+            // `ds_swizzle`, `ds_bpermute`, `v_permlane16` / `v_permlanex16`, which the ISA confines there – runs
             // exactly in waves of 32: the thread relabelling makes each host wave one half of a
             // console wave (lanes 32k..32k+31). Not when it crosses halves (`v_mbcnt`,
-            // `v_readlane`, `v_writelane`, `ds_(b)permute`, masks as numbers or lane-constant
+            // `v_readlane`, `v_writelane`, masks as numbers or lane-constant
             // masks), nor when LDS may be shared within the console wave without barriers (a
             // group over 32 threads with LDS): those still need 64-lane waves.
             if wave == 64 && host_max_wave() == 32 && (console_lanes || one_wave && s.lds_dwords > 0) {
@@ -1455,8 +1471,6 @@ impl<'a> Lower<'a> {
                     let n = i.name();
                     n.starts_with("v_mbcnt")
                         || matches!(n, "v_readlane_b32" | "v_writelane_b32")
-                        || n.starts_with("ds_permute")
-                        || n.starts_with("ds_bpermute")
                         || reads_mask_as_data(x.st, i)
                 }) || lane_constant_masks(x.st)
                     || !x.st.wide.is_empty();
@@ -1516,8 +1530,6 @@ impl<'a> Lower<'a> {
                             "v_readlane"
                         } else if n == "v_writelane_b32" {
                             "v_writelane"
-                        } else if n.starts_with("ds_permute") || n.starts_with("ds_bpermute") {
-                            "ds_(b)permute"
                         } else if reads_mask_as_data(x.st, i) {
                             "mask as data"
                         } else {
@@ -4124,19 +4136,45 @@ impl<'a> Lower<'a> {
             return Some(v);
         }
         let (e, i32t) = (self.s.entry, self.s.t.i32);
+        let group = self.s.threads.map_or(0, |t| t[0] * t[1] * t[2]);
+        let zero = self.s.m.i32(0);
+        if group <= 32 {
+            self.wave_base = Some(zero);
+            return Some(zero);
+        }
         let lds = self.s.lds();
         let k = self.s.m.i32(slot);
         let ptr = self.s.m.element(e, lds, k);
-        let zero = self.s.m.i32(0);
         self.s.m.store(e, ptr, zero);
         self.group_sync(e);
         let lane = self.s.op(e, "waveGetLaneIndex", Attr::ReadOnly, i32t, 111, &[]);
         let first = self.s.m.cmp(e, pred::EQ, lane, zero);
         let k32 = self.s.m.i32(32);
-        let add = self.s.m.select(e, first, k32, zero);
-        let ptr = self.s.m.element(e, lds, k);
-        let old = self.s.m.atomic(e, Rmw::Add, ptr, add);
-        let base = self.s.op(e, "waveReadLaneFirst.i32", Attr::NoUnwind, i32t, 118, &[old]);
+        let base = if !group.is_multiple_of(32) {
+            // A partial tail wave (< 32 active lanes) must not consume a 32-thread
+            // slot from the LDS counter: if it ran ahead of a full wave, it would
+            // leave console threads unexecuted and push a full wave's upper lanes
+            // past `group`. Only full 32-lane waves draw from the counter; the
+            // partial tail wave gets `(group / 32) * 32` directly.
+            let t = self.s.m.bool(true);
+            let four = self.s.m.named_struct("dx.types.fouri32", vec![i32t; 4]);
+            let ballot = self.s.op(e, "waveActiveBallot", Attr::NoUnwind, four, 116, &[t]);
+            let mask = self.s.m.extract(e, ballot, 0);
+            let all = self.s.m.i32(u32::MAX);
+            let full = self.s.m.cmp(e, pred::EQ, mask, all);
+            let take = self.s.m.bin(e, Bin::And, first, full);
+            let add = self.s.m.select(e, take, k32, zero);
+            let ptr = self.s.m.element(e, lds, k);
+            let old = self.s.m.atomic(e, Rmw::Add, ptr, add);
+            let old0 = self.s.op(e, "waveReadLaneFirst.i32", Attr::NoUnwind, i32t, 118, &[old]);
+            let tail = self.s.m.i32((group / 32) * 32);
+            self.s.m.select(e, full, old0, tail)
+        } else {
+            let add = self.s.m.select(e, first, k32, zero);
+            let ptr = self.s.m.element(e, lds, k);
+            let old = self.s.m.atomic(e, Rmw::Add, ptr, add);
+            self.s.op(e, "waveReadLaneFirst.i32", Attr::NoUnwind, i32t, 118, &[old])
+        };
         self.s.flags |= flags::WAVE_OPS;
         self.wave_base = Some(base);
         Some(base)
@@ -4340,6 +4378,10 @@ impl<'a> Lower<'a> {
         } else {
             self.s.op(at, "waveGetLaneIndex", Attr::ReadOnly, self.s.t.i32, 111, &[])
         };
+        self.lane_bit_at(at, lane, lo, hi)
+    }
+
+    fn lane_bit_at(&mut self, at: usize, lane: V, lo: V, hi: Option<V>) -> V {
         let (k31, k32, one, z) = (
             self.s.m.i32(31),
             self.s.m.i32(32),
@@ -4982,6 +5024,27 @@ impl<'a> Lower<'a> {
                     [0, 1, 2, 3].map(|i| ((i & offset | offset >> 5 & 3) ^ offset >> 10 & 3) as u8 & 3)
                 };
                 self.quad_read(x, lanes)
+            } else if self.s.threads.is_some()
+                && self.s.mesh.is_none()
+                && self.exchange.is_none()
+            {
+                // A console lane sends a swizzle value only when its EXEC
+                // bit is set. Ballot the guard over the host lanes present
+                // here so absent lanes and lanes masked by EXEC both read as zero.
+                let on = guard.unwrap_or_else(|| self.s.m.bool(true));
+                let i32t = self.s.t.i32;
+                let four = self.s.m.named_struct("dx.types.fouri32", vec![i32t; 4]);
+                let ballot = self
+                    .s
+                    .op(c, "waveActiveBallot", Attr::NoUnwind, four, 116, &[on]);
+                let lo = self.s.m.extract(c, ballot, 0);
+                let hi = self.x.native.wave64.then(|| self.s.m.extract(c, ballot, 1));
+                let active = self.lane_bit_at(c, src, lo, hi);
+                // Keep the DXIL read defined even for an inactive source.
+                let src = self.s.m.select(c, active, src, lane);
+                let read = self.read_lane(x, src);
+                let zero = self.s.m.i32(0);
+                self.s.m.select(c, active, read, zero)
             } else {
                 self.read_lane(x, src)
             };
@@ -4989,38 +5052,94 @@ impl<'a> Lower<'a> {
             self.write(inst, Reg::V(reg), r, guard);
             return Ok(());
         }
-        if name == "ds_bpermute_b32" {
-            // Backward permute: no LDS is touched. Each lane takes the data
-            // register of the lane its address names, (address + offset) / 4
-            // within the wave; a source lane outside EXEC gives 0. (
-            // the title's checkerboard shadow-mask generators read their
-            // neighbours' samples with it; without them every shadowed light
-            // was multiplied by an empty mask.)
-            // shortcut: a source lane that is not at this instruction on the
-            // host (it left through a branch, not a guard) is read as the
-            // host gives it; the console reads 0.
+        if name == "ds_permute_b32" {
             self.cross_lane(false)?;
-            if self.exchange.as_ref().is_some_and(|e| !e.1) {
-                // a console wave of 64 run as two host waves: the lane named
-                // may be in the other one
-                return Err("a lane permute across two host waves");
+            let addr = self.vgprs(inst, addr.as_ref().ok_or("a scatter address")?, 1)?[0];
+            let data = self.vgprs(inst, data.first().ok_or("a scatter source")?, 1)?[0];
+            let offset = self.s.m.i32(offset);
+            let bytes = self.s.m.bin(c, Bin::Add, addr, offset);
+            let two = self.s.m.i32(2);
+            let target = self.s.m.bin(c, Bin::LShr, bytes, two);
+            let lane = self.lane_index();
+            let zero = self.s.m.i32(0);
+            let k32 = self.s.m.i32(32);
+            let half = self.s.m.bin(c, Bin::And, lane, k32);
+            let upper = self.s.m.cmp(c, pred::NE, half, zero);
+            let i32t = self.s.t.i32;
+            let four = self.s.m.named_struct("dx.types.fouri32", vec![i32t; 4]);
+            let ballot = |l: &mut Self, pred: V| {
+                let vote = l.s.op(c, "waveActiveBallot", Attr::NoUnwind, four, 116, &[pred]);
+                let low = l.s.m.extract(c, vote, 0);
+                if l.s.wave_size == Some(64) {
+                    let high = l.s.m.extract(c, vote, 1);
+                    l.s.m.select(c, upper, high, low)
+                } else {
+                    low
+                }
+            };
+            // For each destination bit keep the senders whose address matches
+            // this lane. The final mask contains only senders in our own half.
+            let on = guard.unwrap_or_else(|| self.s.m.bool(true));
+            let mut senders = ballot(self, on);
+            let ones = self.s.m.i32(u32::MAX);
+            for bit in 0..5 {
+                let mask = self.s.m.i32(1 << bit);
+                let target_bit = self.s.m.bin(c, Bin::And, target, mask);
+                let set = self.s.m.cmp(c, pred::NE, target_bit, zero);
+                let votes = ballot(self, set);
+                let inverse = self.s.m.bin(c, Bin::Xor, votes, ones);
+                let lane_bit = self.s.m.bin(c, Bin::And, lane, mask);
+                let take_set = self.s.m.cmp(c, pred::NE, lane_bit, zero);
+                let matching = self.s.m.select(c, take_set, votes, inverse);
+                senders = self.s.m.bin(c, Bin::And, senders, matching);
             }
+            let leading = self.s.op(c, "unaryBits.i32", Attr::ReadNone, i32t, 33, &[senders]);
+            let last = self.s.m.i32(31);
+            let winner = self.s.m.bin(c, Bin::Sub, last, leading);
+            let winner = self.s.m.bin(c, Bin::Or, half, winner);
+            let any = self.s.m.cmp(c, pred::NE, senders, zero);
+            let safe = self.s.m.select(c, any, winner, lane);
+            let value = self.read_lane(data, safe);
+            let result = self.s.m.select(c, any, value, zero);
+            self.write(inst, Reg::V(dst_reg.ok_or("a scatter result")?), result, guard);
+            return Ok(());
+        }
+        if name == "ds_bpermute_b32" {
+            // RDNA2 ISA 10.4.4: each half of a wave64 gathers independently.
+            self.cross_lane(false)?;
             let at = self.vgprs(inst, addr.as_ref().ok_or("a permute address")?, 1)?[0];
             let x = self.vgprs(inst, data.first().ok_or("a permute source")?, 1)?[0];
             let o = self.s.m.i32(offset);
             let at = self.s.m.bin(c, Bin::Add, at, o);
             let two = self.s.m.i32(2);
             let src = self.s.m.bin(c, Bin::LShr, at, two);
-            let last = self.s.m.i32(self.wave() - 1);
-            let src = self.s.m.bin(c, Bin::And, src, last);
-            let x = match guard {
-                Some(g) => {
-                    let z = self.s.m.i32(0);
-                    self.s.m.select(c, g, x, z)
-                }
-                None => x,
+            let k31 = self.s.m.i32(31);
+            let bit = self.s.m.bin(c, Bin::And, src, k31);
+            let lane = self.lane_index();
+            let on = guard.unwrap_or_else(|| self.s.m.bool(true));
+            let i32t = self.s.t.i32;
+            let four = self.s.m.named_struct("dx.types.fouri32", vec![i32t; 4]);
+            let ballot = self.s.op(c, "waveActiveBallot", Attr::NoUnwind, four, 116, &[on]);
+            let lo = self.s.m.extract(c, ballot, 0);
+            let zero = self.s.m.i32(0);
+            let (source, mask) = if self.s.wave_size == Some(64) {
+                let k32 = self.s.m.i32(32);
+                let half = self.s.m.bin(c, Bin::And, lane, k32);
+                let upper = self.s.m.cmp(c, pred::NE, half, zero);
+                let hi = self.s.m.extract(c, ballot, 1);
+                (self.s.m.bin(c, Bin::Or, half, bit), self.s.m.select(c, upper, hi, lo))
+            } else {
+                (bit, lo)
             };
-            let r = self.read_lane(x, src);
+            let shifted = self.s.m.bin(c, Bin::LShr, mask, bit);
+            let one = self.s.m.i32(1);
+            let active = self.s.m.bin(c, Bin::And, shifted, one);
+            let active = self.s.m.cmp(c, pred::NE, active, zero);
+            // Reading a nonparticipating DXIL lane is undefined. Read our own
+            // lane in that case, then return the zero required by the ISA.
+            let safe = self.s.m.select(c, active, source, lane);
+            let read = self.read_lane(x, safe);
+            let r = self.s.m.select(c, active, read, zero);
             let reg = dst_reg.ok_or("a permute result")?;
             self.write(inst, Reg::V(reg), r, guard);
             return Ok(());
@@ -7867,6 +7986,22 @@ impl<'a> Lower<'a> {
         }
         let mut guard = self.guard(b, i)?;
         if let Some(d) = v.dpp {
+            if self.s.pixel && matches!(d, Dpp::Lanes { .. }) {
+                // A missing local guard can also mean that a divergent branch
+                // already excluded lanes. Only use helpers in a straight-line
+                // entry block after EXEC has explicitly entered whole-quad mode.
+                let exec = Reg::S(EXEC);
+                let last_mask = self.x.p.blocks[b].insts[..i].iter().rev().find(|op| {
+                    op.write(exec).is_some()
+                        || (self.x.p.wave64 && op.write(Reg::S(EXEC + 1)).is_some())
+                });
+                let wqm = if self.x.p.wave64 { "s_wqm_b64" } else { "s_wqm_b32" };
+                if guard.is_some() || b != 0 || !self.x.p.blocks[b].preds.is_empty()
+                    || !last_mask.is_some_and(|op| op.name() == wqm && op.write(exec).is_some())
+                {
+                    return Err("a pixel DPP8 outside known whole-quad execution");
+                }
+            }
             let (x, enable) = self.dpp(inst, d)?;
             guard = match (guard, enable) {
                 (Some(g), Some(e)) => Some(self.s.m.bin(self.cur, Bin::And, g, e)),
@@ -7890,10 +8025,24 @@ impl<'a> Lower<'a> {
         };
         let x = self.i32_of(inst.read(Reg::V(reg)).ok_or("a DPP operand")?)?;
         // Quad permutations and DPP8 stay in groups the pixel layout shares.
-        let quad = matches!(dpp, Dpp::Row { ctrl: 0..=0xFF, .. });
+        let quad = match dpp {
+            Dpp::Row { ctrl, .. } => ctrl <= 0xff,
+            // Pixel waves may contain just one quad. Each half of the
+            // guest group must select the same relative lane in its quad.
+            Dpp::Lanes { sel, fi: false } if self.s.pixel => (0..4).all(|lane| {
+                let first = (sel >> (3 * lane)) & 7;
+                let second = (sel >> (3 * (lane + 4))) & 7;
+                first < 4 && second == first + 4
+            }),
+            Dpp::Lanes { .. } => false,
+        };
         let mesh_quad = self.s.mesh.is_some() && quad;
         if !mesh_quad {
             self.cross_lane(quad)?;
+        }
+        if self.s.pixel && quad && let Dpp::Lanes { sel, .. } = dpp {
+            let lanes = [0, 1, 2, 3].map(|i| ((sel >> (3 * i)) & 3) as u8);
+            return Ok((self.quad_read(x, lanes), None));
         }
         let c = self.cur;
         let lane = self.lane_index();
@@ -11113,8 +11262,8 @@ impl<'a> Lower<'a> {
         };
         if op == 72 {
             // Width, height, depth or layers, levels (per dmask) of the level
-            // in the first address: DXIL's dimensions; a channel DXIL leaves
-            // out reads 1 (UAVs: one level).
+            // in the first address. Non-cube views return zero for unused
+            // extents. A UAV still reports one level.
             let h = self.handle(site, src, false, props)?;
             let mip = if uav {
                 self.s.m.undef(self.s.t.i32)
@@ -11127,6 +11276,8 @@ impl<'a> Lower<'a> {
                 .s
                 .op(c, "getDimensions", Attr::ReadOnly, dims, 72, &[h, mip]);
             let one = self.s.m.i32(1);
+            // Keep the existing cube depth fallback.
+            let missing_extent = self.s.m.i32(u32::from(kind == 5));
             let present = match kind {
                 1 => [true, false, false, true],
                 2 | 5 | 6 => [true, true, false, true],
@@ -11136,8 +11287,10 @@ impl<'a> Lower<'a> {
                 return Err("an image result");
             };
             for (k, ch) in (0..4u32).filter(|ch| dmask >> ch & 1 != 0).enumerate() {
-                let x = if ch == 3 && uav || !present[ch as usize] {
+                let x = if ch == 3 && uav {
                     one
+                } else if !present[ch as usize] {
+                    missing_extent
                 } else {
                     self.s.m.extract(c, d, ch)
                 };
@@ -12883,6 +13036,47 @@ mod tests {
     use crate::{io, ir, resource, structure};
 
     const S_ENDPGM: u32 = 0xBF81_0000;
+
+    #[test]
+    fn swap_tracks_uniformity_for_each_result() {
+        use super::{Reg, all_lane_blocks, lane_uniform};
+
+        // A register number of 256 names v0, the varying thread ID.
+        // Inline constants start at 128 (0); 170 and 145 encode 42 and 17.
+        let mov = |reg: u8, input| 0x7E00_0200 | (u32::from(reg) << 17) | input;
+        let check = |dst: u8, src: u8, dst_input, src_input, guarded| {
+            let mut words = vec![mov(dst, dst_input)];
+            if dst != src {
+                words.push(mov(src, src_input));
+            }
+            if guarded {
+                words.push(0x7DA8_00A0); // v_cmpx_gt_u32 exec, 32, v0
+            }
+            words.push(0x7E00_CB00 | (u32::from(dst) << 17) | u32::from(src));
+            words.push(S_ENDPGM);
+            let code: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+            let p = ir::build(&code, true, 8).unwrap();
+            let st = structure::structure(&p).unwrap();
+            let same = lane_uniform(&p, &st, &all_lane_blocks(&st).unwrap(), false);
+            let index = p.blocks[0].insts.iter().position(|i| i.name() == "v_swap_b32").unwrap();
+            assert_eq!(st.guards[0][index].is_some(), guarded);
+            let swap = &p.blocks[0].insts[index];
+            for (reg, input) in [(dst, src_input), (src, dst_input)] {
+                let uniform = same.contains(&swap.write(Reg::V(reg)).unwrap());
+                assert_eq!(uniform, !guarded && input != 256,
+                    "swap v{dst}, v{src}, inputs {dst_input}/{src_input}, guarded {guarded}, result v{reg}");
+            }
+        };
+        for (dst, src) in [(5, 6), (6, 5)] {
+            for (a, b) in [(256, 170), (170, 256), (170, 145), (256, 256)] {
+                check(dst, src, a, b, false);
+            }
+        }
+        check(5, 5, 170, 170, false);
+        check(5, 5, 256, 256, false);
+        // Half the wave keeps the old values: both registers now vary.
+        check(5, 6, 170, 145, true);
+    }
 
     #[test]
     fn packed_pixel_inputs_find_their_second_row() {

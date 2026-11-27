@@ -1029,6 +1029,10 @@ impl Views {
     /// [`entry`](Self::entry), keeping at most `cap` entries of views
     /// without a resource (0: all).
     fn entry_kept(&mut self, view: View, cap: usize) -> [u32; 2] {
+        if cap == 0 {
+            // No cap: nothing is noted, as before there was one.
+            return self.entry_made(view);
+        }
         let ownerless = view.resources() == [0, 0] && matches!(view, View::Constant(..) | View::Placed(..));
         let fresh = !self.index.contains_key(&view);
         let words = self.entry_made(view);
@@ -1829,6 +1833,9 @@ mod tests {
             views.entry_kept(placed(n), 0);
         }
         assert_eq!(views.index.len(), 1 + 4 + 20);
+        // And notes nothing: the line is as long as the cap of 4 left it.
+        assert_eq!(views.ownerless.len(), 4);
+        assert!(named(&views, views.index.get(&placed(40)).map(|&i| [i, views.list[i as usize].1]).unwrap(), &placed(40)));
     }
 
     /// The leak of run 65: a title that writes constant buffer views and

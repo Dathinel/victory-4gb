@@ -1028,3 +1028,52 @@ fn swap_first_lane_broadcast_reaches_both_host_waves() {
         assert_eq!(word, 63, "guest thread {thread}: first lane of swapped ID plus lane 63");
     }
 }
+
+fn coordinate_program(width: u32, height: u32) -> NativeProgram {
+    let count = width * height;
+    let words = [
+        (0x0b << 25) | (2 << 17) | (1 << 9) | (128 + width), // v2 = width * y
+        (0x25 << 25) | (2 << 17) | (2 << 9) | 256,           // v2 += x
+        0xd765_0003, 0x0001_00c1,                              // v3 = lane
+        (0x25 << 25) | (3 << 17) | (3 << 9) | 129,           // v3 += 1
+        (0x1a << 25) | (15 << 17) | (2 << 9) | 130,          // v15 = v2 * 4
+        0xe0c8_1000, 0x8002_030f,                             // atomic add v3 at v15
+    ];
+    let mut native = native_of(&words, false, count);
+    native.io = StageIo::Cs(ComputeIo { rsrc2: (5 << 1) | (1 << 11), threads: [width, height, 1] });
+    native
+}
+
+/// Each 2-D console coordinate is visited once even when a physical wave
+/// spans two rows. Accumulating lane + 1 keeps the lane operation live.
+#[test]
+#[ignore = "requires a D3D12 hardware adapter with 32-lane waves"]
+fn wave32_group_coordinates_cover_each_cell_once() {
+    let _lock = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    for (width, height) in [(32, 2), (24, 2), (10, 10), (8, 8), (48, 1)] {
+        let count = width * height;
+        let native = coordinate_program(width, height);
+        let p = ir::build(&native.code, false, native.vgprs).unwrap();
+        let shader = lowered(&native, &p, &HashSet::new()).unwrap();
+        let words = on_the_card_uav(&shader, 32, [0, 0], count + 32).expect("wave32 hardware readback");
+        let expected: Vec<u32> = (0..count).map(|i| i % 32 + 1).collect();
+        assert_eq!(&words[..count as usize], expected, "{width}x{height}");
+        assert_eq!(&words[count as usize..], &[0; 32], "{width}x{height} guard");
+    }
+}
+
+/// A full guest allocation leaves no spare dword for the experimental counter.
+#[test]
+#[ignore = "requires VICTORY_THREAD_TICKET=1 and the Windows DXIL validator"]
+fn thread_ticket_respects_the_group_memory_limit() {
+    assert!(std::env::var("VICTORY_THREAD_TICKET").is_ok_and(|v| v == "1"));
+    let mut native = coordinate_program(32, 2);
+    let StageIo::Cs(cs) = &mut native.io else { unreachable!() };
+    cs.rsrc2 |= 64 << 15; // 64 blocks of 512 bytes
+    let p = ir::build(&native.code, false, native.vgprs).unwrap();
+    let mut shader = lowered(&native, &p, &HashSet::new()).unwrap();
+    validator::Validator::load(validator::Validator::default_path().as_deref())
+        .expect("DXIL validator")
+        .validate(&mut shader.dxil)
+        .expect("group-shared memory must fit within 32 KiB");
+}

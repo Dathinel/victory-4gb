@@ -68,8 +68,12 @@ if ($p.Render -eq '0.5') {
     $set.VICTORY_RENDER_SCALE = '0.5'
 }
 if ($p.Budget -gt 0) { $set.VICTORY_TEXTURE_BUDGET_MB = "$($p.Budget)" }
-$list = Join-Path $PSScriptRoot 'rt_off_hashes.txt'
-if (Test-Path $list) { $set.VICTORY_SKIP_PIPELINES = ((Get-Content $list -Raw) -replace '\s', '') }
+# rt_off_hashes.txt: the ray-tracing resolves (trustno1-coder's list). rt_work_off_hashes.txt: work done
+# only for ray tracing, which does not run here: the 41 bvh_skinning programs (about 22 ms of card
+# time a frame) and the probes' CS_Primary_GatherCopy (about 50 ms).
+$skip = 'rt_off_hashes.txt', 'rt_work_off_hashes.txt' | ForEach-Object { Join-Path $PSScriptRoot $_ } |
+    Where-Object { Test-Path $_ } | ForEach-Object { (Get-Content $_ -Raw) -replace '\s', '' }
+if ($skip) { $set.VICTORY_SKIP_PIPELINES = $skip -join ',' }
 
 "quality ${Quality}: textures at $($p.Texture), render scale $($p.Render)" + $(if ($p.Budget) { ", $($p.Budget) MB of textures" })
 if ($Show) {

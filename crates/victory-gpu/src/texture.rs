@@ -1868,6 +1868,7 @@ pub(crate) fn mapped_bytes(at: *const u8, len: usize) -> u64 {
 /// allocation. Keep their original tiled offsets and tail placement while
 /// shortening the source that refreshes watch, copy and hash. Array slices
 /// have the original stride between their prefixes.
+#[cfg(test)]
 fn staging_layout(
     mut layout: victory_formats::texture::Layout,
     drop: u32,

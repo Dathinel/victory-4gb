@@ -154,7 +154,11 @@ fn oracle(threads: u32, thread: u32) -> [u32; OUTPUTS] {
     let wave = thread / 64;
     let lane = thread % 64;
     let lane_sum = |lane| lane * (1 + (lane % 4) + wave);
-    let wave_total = |wave| (0..(threads - wave * 64).min(64)).map(|lane| 1 + lane % 4 + wave).sum();
+    let wave_total = |wave: u32| {
+        (0..(threads - wave * 64).min(64))
+            .map(|lane| 1 + lane % 4 + wave)
+            .sum()
+    };
     [
         lane_sum(lane),
         wave_total(wave),

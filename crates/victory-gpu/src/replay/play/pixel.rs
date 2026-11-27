@@ -496,8 +496,7 @@ impl Player {
         t: &Textures,
         copied: bool,
         scratch: &mut u64,
-        out: &mut Vec<Cmd>,
-    ) {
+    ) -> impl Iterator<Item = Cmd> {
         let (mut to, mut from, mut copies) = (Vec::new(), Vec::new(), Vec::new());
         let mut moved = HashSet::new();
         for (i, s) in spots.iter().enumerate() {
@@ -572,13 +571,9 @@ impl Player {
                 all: vec![transition(SCRATCH, ALL, COPY_SOURCE, COPY_DEST)],
             });
         }
-        if !to.is_empty() {
-            out.push(Cmd::Barriers { all: to });
-        }
-        out.extend(copies);
-        if !from.is_empty() {
-            out.push(Cmd::Barriers { all: from });
-        }
+        let before = (!to.is_empty()).then_some(Cmd::Barriers { all: to });
+        let after = (!from.is_empty()).then_some(Cmd::Barriers { all: from });
+        before.into_iter().chain(copies).chain(after)
     }
 
     /// The frame's lists with copies of texels after commands.
@@ -720,7 +715,7 @@ impl Player {
                     let runs = if c.runs_shaders() { pso } else { NONE };
                     let mut take = |before: bool, part: u32, spots: &[Spot], out: &mut Vec<Cmd>| {
                         let first = samples.len() as u64;
-                        self.take(spots, first, &states, &t, copied && !before, &mut scratch, out);
+                        out.extend(self.take(spots, first, &states, &t, copied && !before, &mut scratch));
                         samples.extend(spots.iter().map(|spot| Sample {
                             list: here,
                             command: n,

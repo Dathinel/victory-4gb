@@ -52,7 +52,7 @@ fn guest(threads: u32) -> NativeProgram {
         alu(0x1B, 3, k(3), 2),
         alu(0x25, 3, k(1), 3),
         alu(0x25, 3, v(1), 3), // rounds = 1 + (lane & 3) + wave
-        mov(4, k(0)),
+        mov(4, k(if threads == 96 { 11 } else { 0 })),
         mov(13, k(1)),
         sop1(4, 20, EXEC),
         alu(0x25, 4, v(2), 4), // loop: accumulate the lane number
@@ -92,7 +92,7 @@ fn guest(threads: u32) -> NativeProgram {
     // opposite half. The guest needs ordering within its wave without s_barrier.
     words.extend([
         alu(0x1A, 10, k(2), 0),
-        alu(0x1D, 14, k(if threads % 64 == 48 { 8 } else { 32 }), 0),
+        alu(0x1D, 14, k(if threads % 64 != 0 { 8 } else { 32 }), 0),
         alu(0x1A, 14, k(2), 14),
     ]);
     let counter_bytes = (threads.div_ceil(64) * 4).max(8);
@@ -153,7 +153,7 @@ fn guest(threads: u32) -> NativeProgram {
 fn oracle(threads: u32, thread: u32) -> [u32; OUTPUTS] {
     let wave = thread / 64;
     let lane = thread % 64;
-    let lane_sum = |lane| lane * (1 + (lane % 4) + wave);
+    let lane_sum = |lane| u32::from(threads == 96) * 11 + lane * (1 + (lane % 4) + wave);
     let wave_total = |wave: u32| {
         (0..(threads - wave * 64).min(64))
             .map(|lane| 1 + lane % 4 + wave)
@@ -163,9 +163,13 @@ fn oracle(threads: u32, thread: u32) -> [u32; OUTPUTS] {
         lane_sum(lane),
         wave_total(wave),
         lane_sum([40, 24][(wave & 1) as usize]),
-        lane_sum([20, 36][(wave & 1) as usize]),
+        lane_sum(if threads == 96 && wave == 1 {
+            0
+        } else {
+            [20, 36][(wave & 1) as usize]
+        }),
         wave_total(if threads > 64 { wave ^ 1 } else { wave }),
-        lane_sum(lane ^ if threads % 64 == 48 { 8 } else { 32 }),
+        lane_sum(lane ^ if threads % 64 != 0 { 8 } else { 32 }),
         thread,
     ]
 }
@@ -307,4 +311,10 @@ fn wave64_partial_group_48() {
 #[ignore = "requires a wave32 GPU, Graphics Tools, and DXIL validator"]
 fn wave64_partial_group_112() {
     run(112);
+}
+
+#[test]
+#[ignore = "requires a wave32 GPU, Graphics Tools, and DXIL validator"]
+fn wave64_missing_half_96() {
+    run(96);
 }

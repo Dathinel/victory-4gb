@@ -1216,6 +1216,8 @@ mod tests {
     /// `OMSetDepthBounds` (including across a command-list cut).
     #[test]
     fn depth_bounds_pipeline_loads_and_filters_draws() {
+        use windows::core::Interface;
+
         let Some(host) = host() else {
             return;
         };

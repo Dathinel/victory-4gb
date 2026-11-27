@@ -2661,6 +2661,7 @@ struct Flight {
 }
 
 /// One thing in the line of what waits for the card, in order.
+#[expect(clippy::large_enum_variant, reason = "keep queued flights inline to avoid a separate allocation per submission")]
 enum Late {
     Run(Flight),
     /// A bottom-of-pipe write of the flight before it: address, what, bytes.
@@ -7747,7 +7748,9 @@ fn front_spans(steps: impl Iterator<Item = Touch>) -> Vec<(usize, usize, usize)>
                 given[i] = part;
             }
             Touch::Part => part += 1,
-            Touch::Title | Touch::Nothing => {}
+            #[cfg(test)]
+            Touch::Title => {}
+            Touch::Nothing => {}
         }
     }
     spans.retain(|s| s.1 < s.2);
@@ -7760,7 +7763,8 @@ enum Touch {
     Refresh(usize, usize, usize),
     /// The copy is given to shaders.
     Write(usize),
-    /// Title memory is written.
+    /// The production iterator stops at a title write before emitting a step.
+    #[cfg(test)]
     Title,
     Nothing,
     /// Another part of the submission begins.
@@ -7786,6 +7790,7 @@ fn written_spans(steps: impl Iterator<Item = Touch>) -> Vec<(usize, usize, usize
                     span.2 = true;
                 }
             }
+            #[cfg(test)]
             Touch::Title => break,
             Touch::Nothing | Touch::Part => {}
         }

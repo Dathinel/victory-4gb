@@ -1527,7 +1527,7 @@ fn fills(desc: &ResourceDesc) -> bool {
 /// on their shorter side, whose sides the levels left out halve exactly
 /// into whole 4-texel blocks: host level `m` is then title level `m + N`
 /// texel for texel. Shaders see the texture at half the size per level
-/// left out: views shift their levels ([`shift_levels`]), and copies
+/// left out: views shift their levels, and copies
 /// between such a texture and another are skipped (`list.rs` `unlike`).
 ///
 /// `VICTORY_TEXTURE_KEEP_SIDE=<texels>`: no texture is taken below that
@@ -1633,6 +1633,7 @@ pub(crate) fn readback_subresource(this: This, index: u32) -> Result<u32, &'stat
 /// (`first`, `levels`, `clamp`) on a host texture that leaves out `drop`
 /// title levels: the same texels where they are there, else the host's
 /// largest level. A level count of `u32::MAX` (all of them) stays.
+#[cfg(test)]
 pub(crate) fn shift_levels(drop: u32, first: &mut u32, levels: &mut u32, clamp: &mut f32) {
     if drop == 0 {
         return;

@@ -457,7 +457,7 @@ fn what_landing_costs() {
                             let mut notes = Notes::default();
                             for &(at, now, held) in &landing[jobs[j].clone()] {
                                 // SAFETY: each its own bytes.
-                                unsafe { piece_at(at, now as *const u8, held as *mut u8, &[(0, BLOCK)], true, &mut notes, beside, std::ptr::null()) };
+                                unsafe { piece_at(at, (now as *const u8, held as *mut u8), &[(0, BLOCK)], true, &mut notes, beside, std::ptr::null()) };
                             }
                             notes.flush();
                         });

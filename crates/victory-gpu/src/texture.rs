@@ -62,14 +62,8 @@ pub(crate) struct Staging {
     /// Made by the pass over textures picked by index, for one upload
     /// ([`once`]): read when the list is submitted, and never looked at again.
     once: std::sync::atomic::AtomicBool,
-    /// The title's levels the host texture leaves out
-    /// (`crate::resource::drop_levels`): host level `m` is title level
-    /// `m + drop`.
-    drop: u32,
     /// First mip to read from `layout` for host mip zero.
     first_mip: u32,
-    /// Full title extent for the indexed upload budget and residency checks.
-    title_bytes: usize,
     /// The staging buffer's bytes (counted in `STAGED` while it lives).
     bytes: u64,
     memory: *const u8,
@@ -1973,7 +1967,6 @@ fn staging(resource: This, copy: &crate::resource::HostTexture, first: u32) -> O
     tracing::debug!(?desc, total, "texture contents uploaded from title memory");
     STAGED[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     STAGED[1].fetch_add(total, std::sync::atomic::Ordering::Relaxed);
-    let title_bytes = layout.size as usize;
     let first_mip = 0;
     let s = Arc::new(Staging {
         buffer,
@@ -1992,9 +1985,7 @@ fn staging(resource: This, copy: &crate::resource::HostTexture, first: u32) -> O
         serial: copy.serial,
         holds: copy.holds.clone(),
         once: std::sync::atomic::AtomicBool::new(once() && !on_demand && PICKING.get().is_some()),
-        drop: crate::resource::drop_levels(&desc),
         first_mip,
-        title_bytes,
         bytes: total,
         memory,
         last: Mutex::default(),

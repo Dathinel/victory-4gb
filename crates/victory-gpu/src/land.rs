@@ -133,6 +133,8 @@ pub(crate) fn spent(which: usize, from: std::time::Instant) -> std::time::Instan
 
 /// For the frame-rate line: where landing went, per frame.
 pub(crate) fn log(frames: f64) {
+    #[cfg(feature = "diagnostics")]
+    crate::texback::log_mapping_wait(frames);
     let t: Vec<f64> = TAKEN.iter().map(|t| t.swap(0, Ordering::Relaxed) as f64 / frames).collect();
     if t[0] > 0.0 {
         tracing::info!(

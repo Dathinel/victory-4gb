@@ -197,11 +197,48 @@ pub(crate) fn record(list: &ID3D12GraphicsCommandList, target: Target) -> Option
     Some(Back { buffer, footprints, rows, mips, layout: target.layout, ticket: target.ticket })
 }
 
+#[cfg(feature = "diagnostics")]
+#[derive(Default)]
+struct MappingWait {
+    elapsed: std::time::Duration,
+    acquisitions: u64,
+    slow: u64,
+}
+
+#[cfg(feature = "diagnostics")]
+static MAPPING_WAIT: std::sync::Mutex<MappingWait> = std::sync::Mutex::new(MappingWait {
+    elapsed: std::time::Duration::ZERO,
+    acquisitions: 0,
+    slow: 0,
+});
+
+#[cfg(feature = "diagnostics")]
+pub(crate) fn log_mapping_wait(frames: f64) {
+    let window = std::mem::take(&mut *MAPPING_WAIT.lock().unwrap_or_else(|e| e.into_inner()));
+    if window.acquisitions != 0 {
+        let ms = window.elapsed.as_secs_f64() * 1000.0;
+        tracing::info!(
+            "texture readback mapping lock: {:.3} ms/frame, {:.3} ms/acquisition, {} of {} acquisitions took at least 1 ms",
+            ms / frames, ms / window.acquisitions as f64, window.slow, window.acquisitions,
+        );
+    }
+}
+
 /// Once the list has run, tile its texels back into the same title allocation.
 pub(crate) fn land(back: &Back) {
     static COPIED: AtomicU64 = AtomicU64::new(0);
     static STALE: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "diagnostics")]
+    let requested = std::time::Instant::now();
     let _mapping = crate::watch::title_memory_reading();
+    #[cfg(feature = "diagnostics")]
+    {
+        let elapsed = requested.elapsed();
+        let mut window = MAPPING_WAIT.lock().unwrap_or_else(|e| e.into_inner());
+        window.elapsed += elapsed;
+        window.acquisitions += 1;
+        window.slow += u64::from(elapsed >= std::time::Duration::from_millis(1));
+    }
     let _ticket_guard = TICKETS.lock().unwrap_or_else(|e| e.into_inner());
     if !back.ticket.valid.load(Ordering::Acquire) {
         let skipped = STALE.fetch_add(1, Ordering::Relaxed) + 1;

@@ -536,7 +536,8 @@ void raise(uint3 at : SV_DispatchThreadID) {
 const CELLS: u64 = 64 * 36;
 const CELL_BYTES: u64 = (2 * CELLS + 1) * 16;
 const POINT_BYTES: u64 = 160 * 90 * 48;
-/// Views of what [`fill`] and the march clamp write, a ring.
+/// Views of what [`fill`] writes, a ring (the march clamp's view lives with
+/// its host texture: `HostTexture::march_uav`).
 /// shortcut: a view must last until its list has run, and nothing here
 /// waits for that: the ring is only long. The clamp takes up to 8 a frame,
 /// so 4,096 come round after about 500 frames, where 64 came round after 8;
@@ -556,9 +557,9 @@ struct Pass {
     /// made only with the switch on, and apart: a failure here leaves the
     /// stand-in itself standing.
     fill: Option<(ID3D12PipelineState, ID3D12PipelineState, ID3D12DescriptorHeap)>,
-    /// The marched in-scatter's clamp (`VICTORY_AMBIENT_MARCH`) and its
-    /// views, made as the fill is.
-    march: Option<(ID3D12PipelineState, ID3D12DescriptorHeap)>,
+    /// The marched in-scatter's clamp (`VICTORY_AMBIENT_MARCH`), made as the
+    /// fill is.
+    march: Option<ID3D12PipelineState>,
     cells: ID3D12Resource,
     points: ID3D12Resource,
     step: u32,
@@ -617,7 +618,7 @@ fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -
         }
     };
     let march = (march() > 0.0)
-        .then(|| -> windows::core::Result<_> { Ok((pipeline("MARCH", s!("clear_march"))?, views()?)) })
+        .then(|| pipeline("MARCH", s!("clear_march")))
         .and_then(|made| made.inspect_err(|e| tracing::warn!(error = %e, "no clamp of the marched in-scatter")).ok());
     let fill = skin_fill()
         .then(|| -> windows::core::Result<_> {
@@ -871,18 +872,18 @@ pub(crate) fn clear_march(list: &HostList, image: This) -> bool {
     let (Some(pass), Some(host)) = (pass(), host()) else {
         return false;
     };
-    let Some((clamp, views)) = &pass.march else {
+    let Some(clamp) = &pass.march else {
         return false;
     };
     // (The slow mean: none with the constant, none before a keeping.)
     if !matches!(set(), Set::Estimate(_)) || !KEPT.load(Ordering::Relaxed) {
         return false;
     }
-    let Some(texture) = crate::resource::host_resource(image) else {
+    let Some(copy) = crate::resource::host_copy(image) else {
         return false;
     };
     // SAFETY: a live resource.
-    let d = unsafe { texture.GetDesc() };
+    let d = unsafe { copy.texture.GetDesc() };
     // (R16G16B16A16_FLOAT.)
     if d.Format.0 != 10
         || d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D
@@ -894,34 +895,29 @@ pub(crate) fn clear_march(list: &HostList, image: This) -> bool {
         });
         return false;
     }
-    let view = D3D12_UNORDERED_ACCESS_VIEW_DESC {
-        Format: d.Format,
-        ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
-        Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 { Texture2D: D3D12_TEX2D_UAV { MipSlice: 0, PlaneSlice: 0 } },
+    let views = match copy.march_uav(&host.device) {
+        Ok(views) => views,
+        Err(e) => {
+            static WARN: std::sync::Once = std::sync::Once::new();
+            WARN.call_once(|| tracing::warn!(error = %e, "no UAV for the marched in-scatter"));
+            return false;
+        }
     };
     const WRITTEN: u32 = D3D12_RESOURCE_STATE_UNORDERED_ACCESS.0 as u32;
     const READ: u32 =
         (D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0 | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0) as u32;
-    crate::list::ensure_state(list, image, WRITTEN);
-    list.keep(texture);
+    list.settle(&copy, WRITTEN);
     list.keep(&pass.cells);
     list.keep(&pass.points);
-    let slot = pass.next.fetch_add(1, Ordering::Relaxed) % FILL_VIEWS;
     let mut words = [0u32; 11];
     words[10] = march().to_bits();
     let l = &list.list;
     // (The title's gathers before it wrote the image through other views.)
     uav_barrier(l);
-    // SAFETY: an open list; a slot of our heap; a live texture the list
-    // keeps, in the unordered-access state; buffers the list keeps.
+    // SAFETY: an open list; the list's texture state holds this exact copy
+    // and its immutable heap until reset; buffers the list keeps.
     unsafe {
-        let cpu = D3D12_CPU_DESCRIPTOR_HANDLE {
-            ptr: views.GetCPUDescriptorHandleForHeapStart().ptr + (slot * pass.step) as usize,
-        };
-        let gpu = D3D12_GPU_DESCRIPTOR_HANDLE {
-            ptr: views.GetGPUDescriptorHandleForHeapStart().ptr + u64::from(slot * pass.step),
-        };
-        host.device.CreateUnorderedAccessView(texture, None::<&ID3D12Resource>, Some(&view), cpu);
+        let gpu = views.GetGPUDescriptorHandleForHeapStart();
         l.SetDescriptorHeaps(&[Some(views.clone())]);
         l.SetComputeRootSignature(&pass.root);
         l.SetComputeRoot32BitConstants(0, 11, words.as_ptr().cast(), 0);
@@ -932,7 +928,7 @@ pub(crate) fn clear_march(list: &HostList, image: This) -> bool {
         l.Dispatch((d.Width as u32).div_ceil(8), d.Height.div_ceil(8), 1);
     }
     uav_barrier(l);
-    crate::list::ensure_state(list, image, READ);
+    list.settle(&copy, READ);
     #[cfg(feature = "diagnostics")]
     {
         crate::capture::note_target(image);

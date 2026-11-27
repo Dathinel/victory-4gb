@@ -1443,15 +1443,26 @@ impl<'a> Lower<'a> {
             // Code reading other lanes needs the console's wave size and
             // lane order; so do lane masks read as numbers, and LDS shared
             // within one wave, where the console compiler leaves out barriers.
-            let masked_first = x.native.wave64 && host_max_wave() == 32
-                && p.blocks.iter().enumerate().any(|(b, block)| {
-                    block.insts.iter().enumerate().any(|(i, inst)| {
-                        inst.name() == "v_readfirstlane_b32"
-                            && x.st.guards[b][i].is_some()
-                            && !inst.writes.first().is_some_and(|w| x.res.waterfall.reads.contains(&w.1))
+            let group = cs.threads.iter().product::<u32>();
+            // Even with full EXEC, lane 32 must read lane 0 of its console wave.
+            // Compute uniformity only for programs with a relevant vector read.
+            let first_uniform = std::cell::OnceCell::new();
+            let cross_first = x.native.wave64 && host_max_wave() == 32 && group > 32
+                && insts().any(|inst| {
+                    if inst.name() != "v_readfirstlane_b32"
+                        || inst.writes.first().is_some_and(|w| x.res.waterfall.reads.contains(&w.1)) {
+                        return false;
+                    }
+                    let Fields::Valu(v) = &inst.fields else { return false };
+                    let Some(Operand::Vector { reg, .. }) = v.src.first() else { return false };
+                    let same = first_uniform.get_or_init(|| {
+                        all_lane_blocks(x.st).map(|all| lane_uniform(p, x.st, &all, false))
+                    });
+                    !inst.read(Reg::V(*reg)).is_some_and(|value| {
+                        same.as_ref().is_some_and(|values| values.contains(&value))
                     })
                 });
-            console_lanes = masked_first || insts().any(|i| {
+            console_lanes = cross_first || insts().any(|i| {
                 let n = i.name();
                 n.starts_with("ds_swizzle")
                     || n.contains("permute")
@@ -1464,7 +1475,6 @@ impl<'a> Lower<'a> {
                 // (a branch the wave takes together asks the wave)
                 || !x.st.wide.is_empty();
             let mut wave = if x.native.wave64 { 64 } else { 32 };
-            let group = cs.threads.iter().product::<u32>();
             let one_wave = group <= wave;
             // A host whose waves are at most 32 lanes (NVIDIA) refuses `WaveSize(64)`. A console
             // wave64 program whose cross-lane code stays inside 32-lane halves – DPP rows,
@@ -1475,7 +1485,7 @@ impl<'a> Lower<'a> {
             // masks), nor when LDS may be shared within the console wave without barriers (a
             // group over 32 threads with LDS): those still need 64-lane waves.
             if wave == 64 && host_max_wave() == 32 && (console_lanes || one_wave && s.lds_dwords > 0) {
-                let crosses = masked_first || insts().any(|i| {
+                let crosses = cross_first || insts().any(|i| {
                     let n = i.name();
                     n.starts_with("v_mbcnt")
                         || matches!(n, "v_readlane_b32" | "v_writelane_b32")

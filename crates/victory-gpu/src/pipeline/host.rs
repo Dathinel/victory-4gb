@@ -1378,14 +1378,16 @@ mod tests {
             out.unwrap()
         };
 
-        let run_draw = |min: f32, max: f32| -> u8 {
+        let run_draw = |min: f32, max: f32, direct: bool| -> u8 {
             let mut state = crate::draw::State::default();
             let first_list = host.new_list().unwrap();
             state.set_depth_bounds(&first_list, min, max);
             first_list.close();
             // Replay onto a second host list, exercising `State::replay`.
             let list = host.new_list().unwrap();
-            state.replay(&list);
+            if !direct {
+                state.replay(&list);
+            }
             let rtv = host.rtv(Some(&color), None);
             let dsv = host.dsv(&depth, None);
             let vp = D3D12_VIEWPORT {
@@ -1411,6 +1413,9 @@ mod tests {
                 list.list.RSSetScissorRects(&[rect]);
                 list.list.SetGraphicsRootSignature(&root);
                 list.list.SetPipelineState(&pso);
+                if direct {
+                    list.list.cast::<ID3D12GraphicsCommandList1>().unwrap().OMSetDepthBounds(min, max);
+                }
                 list.list
                     .IASetPrimitiveTopology(windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                 list.list.DrawInstanced(3, 1, 0, 0);
@@ -1459,8 +1464,11 @@ mod tests {
             }
         };
 
-        assert_eq!(run_draw(0.6, 1.0), 0, "depth 0.5 outside [0.6, 1.0] must be rejected");
-        assert_eq!(run_draw(0.4, 0.6), 255, "depth 0.5 inside [0.4, 0.6] must pass");
+        let replayed = [run_draw(0.6, 1.0, false), run_draw(0.4, 0.6, false)];
+        if replayed != [0, 255] {
+            let direct = [run_draw(0.6, 1.0, true), run_draw(0.4, 0.6, true)];
+            panic!("depth 0.5 outside/inside: expected [0, 255], replayed {replayed:?}, direct {direct:?}");
+        }
     }
 
     fn element(format: DXGI_FORMAT, offset: u32) -> D3D12_INPUT_ELEMENT_DESC {

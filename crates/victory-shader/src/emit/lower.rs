@@ -1443,7 +1443,15 @@ impl<'a> Lower<'a> {
             // Code reading other lanes needs the console's wave size and
             // lane order; so do lane masks read as numbers, and LDS shared
             // within one wave, where the console compiler leaves out barriers.
-            console_lanes = insts().any(|i| {
+            let masked_first = x.native.wave64 && host_max_wave() == 32
+                && p.blocks.iter().enumerate().any(|(b, block)| {
+                    block.insts.iter().enumerate().any(|(i, inst)| {
+                        inst.name() == "v_readfirstlane_b32"
+                            && x.st.guards[b][i].is_some()
+                            && !inst.writes.first().is_some_and(|w| x.res.waterfall.reads.contains(&w.1))
+                    })
+                });
+            console_lanes = masked_first || insts().any(|i| {
                 let n = i.name();
                 n.starts_with("ds_swizzle")
                     || n.contains("permute")
@@ -1467,7 +1475,7 @@ impl<'a> Lower<'a> {
             // masks), nor when LDS may be shared within the console wave without barriers (a
             // group over 32 threads with LDS): those still need 64-lane waves.
             if wave == 64 && host_max_wave() == 32 && (console_lanes || one_wave && s.lds_dwords > 0) {
-                let crosses = insts().any(|i| {
+                let crosses = masked_first || insts().any(|i| {
                     let n = i.name();
                     n.starts_with("v_mbcnt")
                         || matches!(n, "v_readlane_b32" | "v_writelane_b32")

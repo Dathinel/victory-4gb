@@ -4266,6 +4266,16 @@ impl<'a> Lower<'a> {
         let p1 = self.s.m.element(at, lds, k1);
         let lo = self.s.m.load(at, p0);
         let hi = self.s.m.load(at, p1);
+        // No upper host wave writes the final pair's second slot for a 1..32-lane tail.
+        let group = self.s.threads.expect("compute exchange group").into_iter().product::<u32>();
+        let hi = if (1..=32).contains(&(group % 64)) {
+            let last_pair = self.s.m.i32(slot + 2 * (group / 64));
+            let has_upper = self.s.m.cmp(at, pred::NE, pair, last_pair);
+            let zero = self.s.m.i32(0);
+            self.s.m.select(at, has_upper, hi, zero)
+        } else {
+            hi
+        };
         // the slots are written again only after every thread read them
         self.group_sync(at);
         (lo, hi)

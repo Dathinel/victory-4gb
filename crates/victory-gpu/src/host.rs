@@ -1021,6 +1021,94 @@ pub(crate) fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    #[ignore = "requires VICTORY_GPU_TIMING=batch, VICTORY_LATE_WAIT=2 and D3D12"]
+    fn batch_timing_records_two_lists_without_dred() {
+        use super::*;
+        assert!(batch_timing() && !timing() && !dred_on());
+        assert_eq!(late_stage(), 2);
+        let host = host().expect("D3D12 adapter");
+        let a = host.new_list().unwrap();
+        let b = host.new_list().unwrap();
+        for (list, label) in [(&a, "first"), (&b, "second")] {
+            list.note_op(|| label.to_owned());
+            list.close();
+        }
+        let long = host.new_list().unwrap();
+        let label = format!("dispatch 1x1x1 [compute {}tail]", "long-name".repeat(40));
+        long.note_op(|| label.clone());
+        long.close();
+        host.execute(&[&long]);
+        assert_eq!(crate::copystat::test_command_samples(&crate::copystat::command_key(&label)), 1);
+        host.execute(&[&a, &b]);
+        assert_eq!(crate::copystat::test_command_samples("first"), 1);
+        assert_eq!(crate::copystat::test_command_samples("second"), 1);
+
+        // A later submission may reuse the same list after the first completed.
+        host.execute(&[&a]);
+        assert_eq!(crate::copystat::test_command_samples("first"), 2);
+        assert_eq!(crate::copystat::test_command_samples("second"), 1);
+
+        use crate::copystat::{C, peek};
+        let before = peek(C::TimingOverwritten);
+        let fence = *host.submitted.lock().unwrap();
+        host.collect_batch_times(fence, [&a, &a, &b].into_iter());
+        assert_eq!(crate::copystat::test_command_samples("first"), 3);
+        assert_eq!(crate::copystat::test_command_samples("second"), 2);
+        assert_eq!(peek(C::TimingOverwritten) - before, 1);
+        let unavailable = peek(C::TimingUnavailable);
+        host.collect_batch_times(fence + 1, [&a].into_iter());
+        assert_eq!(peek(C::TimingUnavailable) - unavailable, 1);
+        // Inject pairs into the completed synthetic list's private readback.
+        let (_, back) = b.stamps().unwrap();
+        for (start, end, valid) in [(0u64, 9u64, false), (9, 8, false), (9, 9, true)] {
+            let mut ptr = std::ptr::null_mut();
+            unsafe {
+                back.Map(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }), Some(&mut ptr)).unwrap();
+                std::ptr::copy_nonoverlapping([start, end].as_ptr(), ptr.cast(), 2);
+                back.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 16 }));
+            }
+            let before = peek(C::TimingUnavailable);
+            let measured = peek(C::TimingMeasured);
+            host.collect_batch_times(fence, [&b].into_iter());
+            assert_eq!(peek(C::TimingUnavailable) - before, u64::from(!valid));
+            assert_eq!(peek(C::TimingMeasured) - measured, u64::from(valid));
+        }
+        let full = host.new_list().unwrap();
+        for _ in 0..STAMPS + 2 {
+            full.note_op(|| "overflow-test".to_owned());
+        }
+        full.close();
+        let truncated = peek(C::TimingTruncated);
+        host.execute(&[&full]);
+        assert_eq!(peek(C::TimingTruncated) - truncated, 3);
+        assert_eq!(crate::copystat::test_command_samples("overflow-test"), u64::from(STAMPS - 1));
+        assert_eq!(crate::copystat::test_command_samples("first"), 3);
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    #[ignore = "manual synthetic CPU and queue overhead measurement"]
+    fn batch_timing_markers_cost() {
+        let host = super::host().expect("D3D12 adapter");
+        let mut samples = Vec::new();
+        for run in 0..13 {
+            let list = host.new_list().unwrap();
+            let start = std::time::Instant::now();
+            for index in 0..256 {
+                list.note_op(|| format!("draw {index} [synthetic]"));
+            }
+            list.close();
+            host.execute(&[&list]);
+            if run > 0 {
+                samples.push(start.elapsed().as_micros());
+            }
+        }
+        samples.sort_unstable();
+        eprintln!("256 markers per list, 12 warmed samples (us): {samples:?}");
+    }
+
     /// A list of ours is found by its name, with the debug layer's note or not.
     #[cfg(feature = "diagnostics")]
     #[test]
@@ -1749,7 +1837,13 @@ fn card_budget() -> bool {
 #[cfg(feature = "diagnostics")]
 fn timing() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| crate::switch::on("VICTORY_GPU_TIMING"))
+    *ON.get_or_init(|| crate::switch::on("VICTORY_GPU_TIMING") && !batch_timing())
+}
+
+#[cfg(feature = "diagnostics")]
+pub(crate) fn batch_timing() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_GPU_TIMING").is_some_and(|v| v == "batch"))
 }
 
 /// Names a host object for the device-removed report, which names the
@@ -2383,7 +2477,7 @@ pub(crate) fn late() -> bool {
 fn late_stage() -> u8 {
     static STAGE: OnceLock<u8> = OnceLock::new();
     *STAGE.get_or_init(|| {
-        if std::env::var_os("VICTORY_GPU_TIMING").is_some() {
+        if std::env::var_os("VICTORY_GPU_TIMING").is_some_and(|v| v != "batch") {
             return 0;
         }
         match std::env::var("VICTORY_LATE_WAIT").as_deref() {
@@ -4923,6 +5017,10 @@ impl Host {
             telling = match item {
                 Late::Run(mut flight) => {
                     last = flight.number;
+                    #[cfg(feature = "diagnostics")]
+                    if batch_timing() {
+                        self.collect_batch_times(flight.fence, flight.order.iter().map(|&i| flight.lists[i].host()));
+                    }
                     for &i in &flight.order {
                         read_backs(flight.lists[i].host());
                     }
@@ -5404,6 +5502,10 @@ impl Host {
                 match item {
                     Late::Run(mut flight) => {
                         last = flight.number;
+                        #[cfg(feature = "diagnostics")]
+                        if batch_timing() {
+                            self.collect_batch_times(flight.fence, flight.order.iter().map(|&i| flight.lists[i].host()));
+                        }
                         for &i in &flight.order {
                             read_backs(flight.lists[i].host());
                         }
@@ -5470,6 +5572,39 @@ impl Host {
         blame_stale(&stale);
         self.settle(submitted, WHY_STALE);
         crate::watch::ask_once(ranges);
+    }
+
+    #[cfg(feature = "diagnostics")]
+    fn collect_batch_times<'a>(&self, fence: u64, lists: impl Iterator<Item = &'a HostList>) {
+        use crate::copystat::{C, add};
+        // SAFETY: queries of our queue and fence, without waiting for either.
+        let completed = unsafe { self.fence.GetCompletedValue() };
+        let frequency = if completed >= fence && completed != u64::MAX {
+            unsafe { self.queue.GetTimestampFrequency() }.ok().filter(|&v| v > 0)
+        } else {
+            None
+        };
+        let mut seen = std::collections::HashSet::new();
+        for list in lists {
+            let notes = list.notes.lock().unwrap_or_else(|e| e.into_inner()).len();
+            let Some(frequency) = frequency else {
+                add(C::TimingUnavailable, notes as u64);
+                continue;
+            };
+            // A list's query buffer contains only its last execution.
+            if !seen.insert(std::ptr::from_ref(list)) {
+                add(C::TimingOverwritten, notes as u64);
+                continue;
+            }
+            let count = notes.min((STAMPS - 1) as usize);
+            let times = list.slowest(frequency, usize::MAX);
+            add(C::TimingTruncated, (notes - count) as u64);
+            add(C::TimingMeasured, times.len() as u64);
+            add(C::TimingUnavailable, (count - times.len()) as u64);
+            for (ms, op) in times {
+                crate::copystat::command_took(&op, ms);
+            }
+        }
     }
 
     /// [`Host::execute`], or with `late` the first half of
@@ -5823,6 +5958,10 @@ impl Host {
                 }
             }
             let _ = (i, started);
+        }
+        #[cfg(feature = "diagnostics")]
+        if batch_timing() {
+            self.collect_batch_times(*submitted, runs.iter().copied());
         }
         let _ = &firsts;
         FINISHED.store(this_submission, Ordering::Release);
@@ -6197,7 +6336,7 @@ impl HostList {
     /// The timestamp heap and its read-back buffer (diagnostics, timing on).
     #[cfg(feature = "diagnostics")]
     fn stamps(&self) -> Option<&(ID3D12QueryHeap, ID3D12Resource)> {
-        if !timing() {
+        if !timing() && !batch_timing() {
             return None;
         }
         self.stamps
@@ -6260,13 +6399,25 @@ impl HostList {
             s
         };
         let mut times: Vec<(f64, String)> = (0..count)
-            .map(|i| {
-                let ticks = stamps[i + 1].saturating_sub(stamps[i]);
-                (ticks as f64 * 1e3 / frequency.max(1) as f64, notes[i].0.chars().take(300).collect())
+            .filter_map(|i| {
+                let ticks = if batch_timing() {
+                    if stamps[i] == 0 { return None; }
+                    stamps[i + 1].checked_sub(stamps[i])?
+                } else {
+                    stamps[i + 1].saturating_sub(stamps[i])
+                };
+                let label = if batch_timing() {
+                    crate::copystat::command_key(&notes[i].0)
+                } else {
+                    notes[i].0.chars().take(300).collect()
+                };
+                Some((ticks as f64 * 1e3 / frequency.max(1) as f64, label))
             })
             .collect();
-        times.sort_by(|a, b| b.0.total_cmp(&a.0));
-        times.truncate(n);
+        if n != usize::MAX {
+            times.sort_by(|a, b| b.0.total_cmp(&a.0));
+            times.truncate(n);
+        }
         times
     }
 
@@ -6283,10 +6434,14 @@ impl HostList {
         self.take_coming();
         #[cfg(feature = "diagnostics")]
         if let Some((heap, back)) = self.stamps() {
-            let count = (self.notes.lock().unwrap_or_else(|e| e.into_inner()).len() as u32).min(STAMPS - 1);
+            let notes = self.notes.lock().unwrap_or_else(|e| e.into_inner()).len();
+            let count = notes.min((STAMPS - 1) as usize) as u32;
             // SAFETY: an open list, our heap and read-back buffer.
             unsafe {
-                self.list.EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, count);
+                // Once full, the first unmeasured command already ended the final interval.
+                if notes < STAMPS as usize {
+                    self.list.EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, count);
+                }
                 self.list.ResolveQueryData(heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, count + 1, back, 0);
             }
         }
@@ -6753,25 +6908,27 @@ impl HostList {
 
     #[cfg(feature = "diagnostics")]
     fn note(&self, what: impl FnOnce() -> String, range: Option<(u64, u64)>) {
-        if !dred_on() {
+        if !dred_on() && !batch_timing() {
             crate::capture::op(std::ptr::from_ref(self) as usize, what);
             return;
         }
         {
             let started = std::time::Instant::now();
-            let at = self.notes.lock().unwrap_or_else(|e| e.into_inner()).len() as u32;
-            if let Some((heap, _)) = self.stamps() && at < STAMPS - 1 {
+            let at = self.notes.lock().unwrap_or_else(|e| e.into_inner()).len();
+            if let Some((heap, _)) = self.stamps() && at < STAMPS as usize {
                 // SAFETY: an open list and our query heap.
-                unsafe { self.list.EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, at) };
+                unsafe { self.list.EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, at as u32) };
             }
             let what = what();
             crate::capture::op(std::ptr::from_ref(self) as usize, || what.clone());
-            let text: Vec<u16> = what.encode_utf16().chain([0]).collect();
-            const UNICODE: u32 = 0;
-            // SAFETY: an open list; the marker is copied when recorded.
-            unsafe {
-                self.list.SetMarker(UNICODE, Some(text.as_ptr().cast()), 2 * text.len() as u32)
-            };
+            if dred_on() {
+                let text: Vec<u16> = what.encode_utf16().chain([0]).collect();
+                const UNICODE: u32 = 0;
+                // SAFETY: an open list; the marker is copied when recorded.
+                unsafe {
+                    self.list.SetMarker(UNICODE, Some(text.as_ptr().cast()), 2 * text.len() as u32)
+                };
+            }
             self.notes
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

@@ -129,8 +129,12 @@ pub(crate) enum C {
     WaitsForGroups,
     WaitsForBuffers,
     IndirectBounded,
+    TimingMeasured,
+    TimingOverwritten,
+    TimingTruncated,
+    TimingUnavailable,
 }
-const COUNTERS: usize = 80;
+const COUNTERS: usize = C::TimingUnavailable as usize + 1;
 /// One of some sets of counters, each in lines of the processor's memory of
 /// its own: a set for all threads had them wait for each other's lines at
 /// every list call (what counts here is summed up for the log alone).
@@ -225,10 +229,16 @@ pub(crate) fn command_took(op: &str, ms: f64) {
     e.2 = e.2.max(us);
 }
 
+#[cfg(test)]
+pub(crate) fn test_command_samples(key: &str) -> u64 {
+    let by = COMMANDS_BY_WORK.lock().unwrap_or_else(|e| e.into_inner());
+    by.as_ref().and_then(|map| map.get(key)).map_or(0, |entry| entry.0)
+}
+
 /// What a command's note is summed under: its pipeline (`[compute ...]`,
 /// `[mesh ..., pixel ...]`) with the command's first word, or without a
 /// pipeline its first two words.
-fn command_key(op: &str) -> String {
+pub(crate) fn command_key(op: &str) -> String {
     let head = op.split(" | ").next().unwrap_or(op);
     let word = head.split(' ').next().unwrap_or("");
     match (head.find('['), head.find(']')) {
@@ -1306,6 +1316,13 @@ pub(crate) fn log(frames: f64) {
             us as f64 / 1e3 / frames,
             n as f64 / frames,
             what.chars().take(700).collect::<String>()
+        );
+    }
+    if crate::host::batch_timing() {
+        tracing::info!(
+            "GPU timing coverage per frame (annotated commands in collected lists): {:.1} measured, {:.1} overwritten by list reuse, {:.1} beyond query capacity, {:.1} unavailable",
+            c[C::TimingMeasured as usize], c[C::TimingOverwritten as usize],
+            c[C::TimingTruncated as usize], c[C::TimingUnavailable as usize],
         );
     }
     let by = COMMANDS_BY_WORK.lock().unwrap_or_else(|e| e.into_inner()).take();

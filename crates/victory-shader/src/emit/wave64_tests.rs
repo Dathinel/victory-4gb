@@ -14,6 +14,136 @@ use crate::{ShaderError, io, ir, resource, structure};
 
 const S_ENDPGM: u32 = 0xBF81_0000;
 
+/// Runs a compute shader on the hardware device and returns `uav_dwords` dwords
+/// from UAV 0 when the device supports the requested wave size.
+fn on_the_card_uav(
+    shader: &HostShader,
+    width: u32,
+    constants: [u32; 2],
+    uav_dwords: u32,
+) -> Option<Vec<u32>> {
+    let Ok(host) = Host::new(false) else {
+        eprintln!("No hardware device; skipped GPU readback");
+        return None;
+    };
+    use windows::Win32::Graphics::Direct3D12::{
+        D3D12_FEATURE_D3D12_OPTIONS1, D3D12_FEATURE_DATA_D3D12_OPTIONS1,
+    };
+    let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
+    // SAFETY: options is the output structure for D3D12_OPTIONS1.
+    unsafe {
+        host.device.CheckFeatureSupport(
+            D3D12_FEATURE_D3D12_OPTIONS1,
+            (&raw mut options).cast(),
+            size_of_val(&options) as u32,
+        ).expect("wave capabilities");
+    }
+    if !(options.WaveLaneCountMin..=options.WaveLaneCountMax).contains(&width) {
+        eprintln!("Hardware lacks wave{width}; skipped readback");
+        return None;
+    }
+    let (root, pso) = match host.compute_pipeline(shader) {
+        Ok(p) => p,
+        Err(e) => panic!("hardware pipeline refused: {e}"),
+    };
+    let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+    for u in &shader.user_data {
+        if let (RootType::Constants, 0, d @ 0..=1) = (u.root, u.slot, u.dword) {
+            ud[u.index as usize] = constants[d as usize];
+        }
+    }
+    let out = host
+        .dispatch(
+            &root,
+            &pso,
+            &Dispatch {
+                roots: vec![(0, Root::Constants(ud))],
+                views: &[View::RawUav(uav_dwords)],
+                samplers: &[],
+                groups: [1, 1, 1],
+            },
+        )
+        .unwrap_or_else(|e| panic!("dispatch failed: {e}"));
+    eprintln!("Hardware wave{width} readback: {uav_dwords} dwords, inputs {constants:?}");
+    Some(out[0].clone())
+}
+
+/// Builds a wave64 compute program with `threads` threads in x:
+/// - `v1 = v0 + 1000` (each thread's payload)
+/// - `v2 = (v0 ^ s0) << 2` (source lane byte address)
+/// - `v3 = 0x5555_5555` (sentinel kept by guarded-off destination lanes)
+/// - Under `v0 < s1` (`guard`, or a `s_cbranch_execz` skip when `branch` is set):
+///   `ds_bpermute_b32 v3, v2, v1 offset:offset`
+/// - Every thread stores `v3` to `uav[v0]`.
+fn bpermute_program(threads: u32, offset: u16, branch: bool) -> NativeProgram {
+    let mut words = vec![
+        0x4A02_00FF,
+        1000, // v_add_nc_u32 v1, 1000, v0
+        0x3A04_0000, // v_xor_b32 v2, s0, v0
+        0x3404_0482, // v_lshlrev_b32 v2, 2, v2
+        0x7E06_02FF,
+        0x5555_5555, // v_mov_b32 v3, 0x5555_5555
+        0x7D88_0001, // v_cmp_gt_u32 vcc, s1, v0  (v0 < s1)
+        0xBE8C_246A, // s_and_saveexec_b64 s[12:13], vcc
+    ];
+    if branch {
+        words.push(0xBF88_0002); // s_cbranch_execz over the 2-dword ds_bpermute_b32
+    }
+    words.extend_from_slice(&[
+        0xDACC_0000 | u32::from(offset),
+        (3u32 << 24) | (1u32 << 8) | 2u32, // ds_bpermute_b32 v3, v2, v1 offset:offset
+        0xBEFE_040C, // s_mov_b64 exec, s[12:13]
+        0x3408_0082, // v_lshlrev_b32 v4, 2, v0  (byte offset = v0 * 4)
+        0x38 << 26 | 0x1C << 18 | 1 << 12,
+        0x80 << 24 | 2 << 16 | 3 << 8 | 4, // buffer_store_dword v3, v4, s[8:11], 0 offen
+    ]);
+    native_of(&words, true, threads)
+}
+
+fn expected_bpermute(threads: u32, offset: u16, xor_mask: u32, active_below: u32) -> Vec<u32> {
+    (0..threads)
+        .map(|t| {
+            if t >= active_below {
+                return 0x5555_5555;
+            }
+            let wave_off = t & !31;
+            let addr = (t ^ xor_mask).wrapping_shl(2).wrapping_add(u32::from(offset));
+            let src_lane = (addr >> 2) & 31;
+            let src_thread = wave_off + src_lane;
+            if src_thread < threads && src_thread < active_below {
+                src_thread + 1000
+            } else {
+                0
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn bpermute_reads_active_sources_within_each_half() {
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    for (threads, offset, branch) in [(64, 0, false), (64, 128, false), (32, 4, false),
+                                    (17, 0, false), (96, 0, true), (128, 4, true)] {
+        let prog = bpermute_program(threads, offset, branch);
+        let p = ir::build(&prog.code, prog.wave64, prog.vgprs).expect("ir::build");
+        let shader = lowered(&prog, &p, &HashSet::new()).expect("lower");
+        let mut native64 = lowered_on(&prog, &p, &HashSet::new(), 64).expect("native wave64");
+        if let Ok(mut validator) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+            validator.validate(&mut native64.dxil).expect("native wave64 DXIL");
+            eprintln!("Validated native wave64 DXIL: {threads} threads, offset {offset}");
+        } else {
+            eprintln!("DXIL validator unavailable; skipped native wave64 validation");
+        }
+        for (width, shader) in [(32, &shader), (64, &native64)] {
+            for (mask, limit) in [(32, threads), (31, threads), (1, threads - 5), (31, 13)] {
+                let Some(got) = on_the_card_uav(shader, width, [mask, limit], threads) else { break };
+                assert_eq!(got, expected_bpermute(threads, offset, mask, limit),
+                           "threads={threads} offset={offset} branch={branch} xor={mask} active<{limit}");
+            }
+        }
+    }
+}
+
 /// 64 threads in one console wave. Each thread t holds the bit `1 << (t >> 1)`; the threads
 /// below s0 (a root constant) OR theirs over the wave inside `if (t < s0) { ... }` and store
 /// the result to dword 0 of the raw UAV.
@@ -734,5 +864,167 @@ fn the_lanes_past_a_count_of_threads_do_not_run() {
             let i = i as u32;
             assert_eq!(word, u32::from(i < active) + u32::from(i + 64 < active), "count {count}, word {i}");
         }
+    }
+}
+
+/// Wave64 compute groups whose size is not a multiple of 32 (e.g. 48 = 32 + 16,
+/// and 16 < 32) lowered to 32-lane host waves: every console thread index
+/// `0..threads` must execute exactly once per group, with no skipped threads,
+/// duplicate wraps, or out-of-bounds indices.
+#[test]
+fn partial_group_wave64_on_wave32_assigns_every_thread_once() {
+    let words = [
+        // ds_swizzle_b32 v2, v0 offset:0x80E4 (triggers console_lanes -> halves)
+        (0x36 << 26) | (0x35 << 18) | 0x80E4,
+        2 << 24,
+        0x3402_0482, // v_lshlrev_b32 v1, 2, v2 (byte offset = thread_id.x * 4)
+        0x7E06_0281, // v_mov_b32 v3, 1
+        // buffer_atomic_add v3, v1, s[8:11], 0 offen
+        (0x38 << 26) | (0x32 << 18) | (1 << 12),
+        (0x80 << 24) | (2 << 16) | (3 << 8) | 1,
+    ];
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    for threads in [16u32, 48, 64, 80] {
+        let native = native_of(&words, true, threads);
+        let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+        let shader = lowered(&native, &p, &HashSet::new()).expect("lower");
+        if let Ok(mut v) =
+            validator::Validator::load(validator::Validator::default_path().as_deref())
+        {
+            let mut copy = shader.dxil.clone();
+            v.validate(&mut copy)
+                .unwrap_or_else(|e| panic!("DXIL validation failed for {threads} threads: {e}"));
+        }
+        let Ok(host) = Host::new(false) else {
+            eprintln!("No SM 6.6 hardware adapter; skipped GPU readback");
+            return;
+        };
+        let (root, pso) = match host.compute_pipeline(&shader) {
+            Ok(pipeline) => pipeline,
+            Err(e) => {
+                eprintln!("Could not create the wave32 pipeline: {e}; skipped GPU readback");
+                return;
+            }
+        };
+        let groups = 64u32;
+        let ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+        let out = host
+            .dispatch(
+                &root,
+                &pso,
+                &Dispatch {
+                    roots: vec![(0, Root::Constants(ud))],
+                    views: &[View::RawUav(96)],
+                    samplers: &[],
+                    groups: [groups, 1, 1],
+                },
+            )
+            .unwrap_or_else(|e| panic!("dispatch failed ({threads} threads): {e}"));
+        for slot in 0..threads as usize {
+            assert_eq!(
+                out[0][slot], groups,
+                "threads={threads}: slot {slot} got {} (expected {groups})",
+                out[0][slot]
+            );
+        }
+        for slot in threads as usize..96 {
+            assert_eq!(
+                out[0][slot], 0,
+                "threads={threads}: out-of-range slot {slot} was written ({})",
+                out[0][slot]
+            );
+        }
+        eprintln!("Verified {groups} hardware groups of {threads} threads");
+    }
+}
+
+#[test]
+fn scatter_selects_the_highest_active_sender_per_half() {
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    for (threads, collide, twice) in [(32, false, false), (64, false, false), (64, true, false), (128, true, true)] {
+        let mut prog = bpermute_program(threads, 0, collide && !twice);
+        let mut code: Vec<u32> = prog.code.chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap())).collect();
+        let distinct_halves = threads == 64 && !collide;
+        if collide || distinct_halves {
+            let addr = code.iter_mut().find(|w| **w == 0x3a04_0000).unwrap();
+            *addr = if distinct_halves {
+                0x2c04_0085 // v_lshrrev_b32 v2, 5, v0: upper half targets slot one
+            } else {
+                0x7e04_0280 // v_mov_b32 v2, 0
+            };
+        }
+        let op = code.iter().position(|&w| w == 0xdacc_0000).unwrap();
+        code[op] = 0xdac8_0000; // ds_permute_b32
+        if twice {
+            // Rotate the first result by one within each half (v2 = v0 << 2).
+            code.splice(op+2..op+2, [0x3404_0082, 0xdac8_0004, (3u32 << 24) | (3 << 8) | 2]);
+        }
+        prog.code = code.into_iter().flat_map(u32::to_le_bytes).collect();
+        let p = ir::build(&prog.code, prog.wave64, prog.vgprs).unwrap();
+        for width in [32, 64] {
+            let mut shader = lowered_on(&prog, &p, &HashSet::new(), width).expect("lower scatter");
+            if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+                v.validate(&mut shader.dxil).expect("valid scatter shader");
+            }
+
+            for active in [threads, threads - 5, 1] {
+                let Some(got) = on_the_card_uav(&shader, width, [1, active], threads) else { break };
+                let scatter = |input: &[u32], second: bool| {
+                    let mut out = vec![0x5555_5555; threads as usize];
+                    out[..active as usize].fill(0);
+                    for sender in 0..active {
+                        let address = if second { sender + 1 } else if distinct_halves { sender >> 5 } else if collide { 0 } else { sender ^ 1 };
+                        let dst = (sender & !31) | (address & 31);
+                        if dst < active {
+                            out[dst as usize] = input[sender as usize];
+                        }
+                    }
+                    out
+                };
+                let mut want = scatter(&(1000..1000+threads).collect::<Vec<_>>(), false);
+                if twice { want = scatter(&want, true); }
+                assert_eq!(got, want, "threads={threads} active={active} collide={collide} twice={twice}");
+            }
+        }
+    }
+}
+
+/// v5 starts as the thread ID and v6 as 42. After their swap, the first lane
+/// of v6 is thread zero for the entire guest wave. Adding lane 63 makes every
+/// expected store nonzero and keeps the full-wave exchange live.
+#[test]
+#[ignore = "requires wave32-capable D3D12 hardware"]
+fn swap_first_lane_broadcast_reaches_both_host_waves() {
+    let words = [
+        0x7E0A_0300, // v_mov_b32 v5, v0
+        0x7E0C_02AA, // v_mov_b32 v6, 42
+        0x7E0A_CB06, // v_swap_b32 v5, v6
+        0x7E1C_0506, // v_readfirstlane_b32 s14, v6
+        0xD760_000F, 0x0001_7F00, // v_readlane_b32 s15, v0, 63
+        0x7E0E_020F, // v_mov_b32 v7, s15
+        0x4A0E_0E0E, // v_add_nc_u32 v7, s14, v7
+        0x3414_0082, // v_lshlrev_b32 v10, 2, v0
+        0xE070_1000, 0x8002_070A, // buffer_store_dword v7, v10, s[8:11], 0 offen
+    ];
+    let native = native(&words);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("build IR");
+    let shader = lowered(&native, &p, &HashSet::new()).expect("lower for wave32");
+    if let Ok(mut validator) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        validator.validate(&mut shader.dxil.clone()).expect("validate DXIL");
+    }
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let host = Host::new(false).expect("hardware adapter");
+    let (root, pso) = host.compute_pipeline(&shader).expect("wave32 compute pipeline");
+    let data = vec![0; shader.user_data_dwords().max(1) as usize];
+    let out = host.dispatch(&root, &pso, &Dispatch {
+        roots: vec![(0, Root::Constants(data))],
+        views: &[View::RawUav(64)],
+        samplers: &[],
+        groups: [1, 1, 1],
+    }).expect("hardware readback");
+    assert_eq!(out[0].len(), 64);
+    for (thread, &word) in out[0].iter().enumerate() {
+        assert_eq!(word, 63, "guest thread {thread}: first lane of swapped ID plus lane 63");
     }
 }

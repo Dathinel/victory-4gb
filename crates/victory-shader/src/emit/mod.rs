@@ -112,6 +112,8 @@ mod valu_tests;
 mod waterfall_tests;
 #[cfg(all(test, windows))]
 mod wave64_tests;
+#[cfg(all(test, windows))]
+mod wave64_group_tests;
 mod wave;
 
 use crate::dxbc::{Container, FourCC};

@@ -103,7 +103,8 @@ pub(crate) fn op(list: usize, what: impl FnOnce() -> String) {
     }
     if let Some((_, n, f)) = file.as_mut() {
         *n += 1;
-        let _ = writeln!(f, "{n} list {list:#x} {what}");
+        let logical = crate::frame::current();
+        let _ = writeln!(f, "{n} list {list:#x} {what} frame_wait={logical}");
     }
 }
 
@@ -383,7 +384,7 @@ pub(crate) fn dump_targets(frame: u64) {
         let texture = &copy.texture;
         // SAFETY: a live resource.
         let d = unsafe { texture.GetDesc() };
-        if d.SampleDesc.Count > 1 || d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D {
+        if d.SampleDesc.Count > 1 || !matches!(d.Dimension, D3D12_RESOURCE_DIMENSION_TEXTURE2D | D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
             continue;
         }
         // Every submission has run; the dump's list moves it there and back.
@@ -441,7 +442,10 @@ fn dump_one(
             return;
         }
         let pitch = f.RowPitch as usize;
-        let rows = std::slice::from_raw_parts(data.cast::<u8>(), pitch * f.Height as usize);
+        // read_back_of uses base offset zero. The buffer width includes all
+        // depth slices, but the final row may lack trailing pitch padding.
+        let bytes = buffer.GetDesc().Width as usize;
+        let rows = std::slice::from_raw_parts(data.cast::<u8>(), bytes);
         // A 24-bit depth plane comes back as 32-bit words: which depth values
         // (low 24 bits) and which top bytes it holds, the most common first.
         if matches!(d.Format.0, 44..=47) {
@@ -462,17 +466,28 @@ fn dump_one(
             };
             tracing::info!(?resource, depths = ?most(depths), top_bytes = ?most(tops), "24-bit depth plane values (value, texels)");
         }
-        if let Some(rgba) = to_rgba(f.Format.0 as u32, f.Width as usize, f.Height as usize, pitch, rows) {
-            let name = format!(
-                "frame-{frame}-{i:02}-{resource:?}-{}x{}-f{}",
-                d.Width, d.Height, d.Format.0
-            );
-            save_as(&name, f.Width, f.Height, f.Width as usize * 4, false, &rgba);
-        } else {
-            tracing::info!(format = f.Format.0, ?resource, "target not dumped: format");
+        let name = format!("frame-{frame}-{i:02}-{resource:?}-{}x{}-f{}", d.Width, d.Height, d.Format.0);
+        // The formats to_rgba decodes are uncompressed: one footprint row per texel row.
+        for (z, slice) in target_slices(rows, pitch, f.Height, f.Depth).enumerate() {
+            let Some(rgba) = to_rgba(f.Format.0 as u32, f.Width as usize, f.Height as usize, pitch, slice) else {
+                tracing::info!(format = f.Format.0, ?resource, "target not dumped: format");
+                break;
+            };
+            let slice_name;
+            let file = if d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D {
+                slice_name = format!("{name}-z{z:03}");
+                &slice_name
+            } else {
+                &name
+            };
+            save_as(file, f.Width, f.Height, f.Width as usize * 4, false, &rgba);
         }
         buffer.Unmap(0, None);
     }
+}
+
+fn target_slices(rows: &[u8], pitch: usize, height: u32, depth: u32) -> impl Iterator<Item = &[u8]> {
+    rows.chunks(pitch * height as usize).take(depth as usize)
 }
 
 /// Logs which values a stencil plane read back by [`read_back_of`] holds
@@ -843,6 +858,19 @@ pub(crate) fn recent_levels() -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn volume_slices_decode_each_row_without_final_pitch_padding() {
+        let pitch = 256;
+        let mut rows = vec![0; 3 * pitch + 4];
+        for (row, red) in [10, 20, 30, 40].into_iter().enumerate() {
+            rows[row * pitch] = red;
+        }
+        let pixels: Vec<_> = super::target_slices(&rows, pitch, 2, 2)
+            .map(|slice| super::to_rgba(28, 1, 2, pitch, slice).unwrap())
+            .collect();
+        assert_eq!(pixels, [vec![10, 0, 0, 255, 20, 0, 0, 255], vec![30, 0, 0, 255, 40, 0, 0, 255]]);
+    }
+
     #[test]
     fn crc_matches_the_png_check_value() {
         assert_eq!(super::crc32(b"IEND"), 0xae42_6082);

@@ -1637,6 +1637,13 @@ impl State {
             // Its geometry stage would turn each triangle into a rectangle.
             once!("a rectangle pipeline drawn with another topology");
         }
+        // Skin reads probe images only rays fill: the stand-in's light goes
+        // there first, and the list has our heap, root signature and pipeline.
+        if crate::ambient::skin_fill() && crate::ambient::on() && self.skin(list, p) {
+            self.host_pipeline = 0;
+            self.host_roots = [0; 2];
+            self.host_heaps_set = false;
+        }
         if !self.bind(list, p, false) {
             return false;
         }
@@ -3546,6 +3553,7 @@ impl State {
             once!("a dispatch with a graphics pipeline");
             return;
         }
+        self.march(list, p);
         if !self.bind(list, p, true) {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             // A stage of the structure builder that cannot be bound is a
@@ -3592,10 +3600,118 @@ impl State {
         }
     }
 
+    /// The stand-in's light in the probe images a skin draw of `p` reads
+    /// (`crate::ambient::SKIN_ATLAS`, `SKIN_LAYERS`), once a frame for each.
+    /// Whether it recorded anything.
+    fn skin(&self, list: &HostList, p: &HostPipeline) -> bool {
+        use crate::ambient::{SKIN_ATLAS, SKIN_LAYERS};
+        static FILLED: std::sync::Mutex<(u64, Vec<usize>)> = std::sync::Mutex::new((u64::MAX, Vec::new()));
+        // The image a stage reads at a place of a table.
+        let read = |s: &crate::pipeline::host::Stage, (slot, offset): (u8, u32)| -> Option<usize> {
+            s.translated().used.iter().find(|u| {
+                u.kind == ResourceType::Srv && u.root == RootType::Table && (u.slot, u.table_offset_dwords) == (slot, offset)
+            })?;
+            let Some(Root::Table(table)) = self.roots_ref(false).get(usize::from(slot)) else {
+                return None;
+            };
+            match crate::descriptor::view(table + u64::from(offset) * 4)? {
+                View::Shader(r, _) if r != 0 => Some(r),
+                _ => None,
+            }
+        };
+        // Named for skin and reading both: its screen-space passes are not.
+        let Some((atlas, layers)) = p
+            .stages
+            .iter()
+            .filter(|s| s.shader.skin)
+            .find_map(|s| Some((read(s, SKIN_ATLAS)?, read(s, SKIN_LAYERS)?)))
+        else {
+            // Said once: a skin-named draw whose probe images are not where
+            // the fill looks (another profile or build of the title).
+            if let Some(s) = p.stages.iter().find(|s| s.shader.skin) {
+                static SAID: std::sync::Once = std::sync::Once::new();
+                SAID.call_once(|| {
+                    tracing::warn!(
+                        atlas = read(s, SKIN_ATLAS).is_some(),
+                        layers = read(s, SKIN_LAYERS).is_some(),
+                        "skin: a draw named for skin does not read both probe images where the fill looks"
+                    );
+                });
+            }
+            return false;
+        };
+        let frame = crate::queue::presented();
+        let mut filled = FILLED.lock().unwrap_or_else(|e| e.into_inner());
+        if filled.0 != frame {
+            *filled = (frame, Vec::new());
+        }
+        let mut any = false;
+        for (image, first_only) in [(layers, crate::ambient::skin_layers()), (atlas, Some(false))] {
+            if let Some(first_only) = first_only
+                && !filled.1.contains(&image)
+            {
+                filled.1.push(image);
+                any |= crate::ambient::fill(list, image as This, first_only);
+            }
+        }
+        any
+    }
+
+    /// Before a dispatch of `p` that reads the in-scatter marched along rays
+    /// (`crate::ambient::MARCH`), with `VICTORY_AMBIENT_MARCH` on: that image
+    /// held to the light of the room. Every such dispatch, not once a frame:
+    /// the clamp changes nothing the second time, and a frame may gather
+    /// twice. The list then has our heap, root signature and pipeline, so
+    /// `bind` sets the title's again.
+    fn march(&mut self, list: &HostList, p: &HostPipeline) {
+        use crate::ambient::{MARCH, Role};
+        let Some(s) = p.stages.first().filter(|s| s.shader.ambient == Some(Role::March)) else {
+            return;
+        };
+        if crate::ambient::march() == 0.0 || !crate::ambient::on() {
+            return;
+        }
+        let mut any = false;
+        for (slot, offset) in MARCH {
+            let reads = s.translated().used.iter().any(|u| {
+                u.kind == ResourceType::Srv && u.root == RootType::Table && (u.slot, u.table_offset_dwords) == (slot, offset)
+            });
+            let Some(Root::Table(table)) = self.roots_ref(true).get(usize::from(slot)) else {
+                continue;
+            };
+            if reads
+                && let Some(View::Shader(r, _)) = crate::descriptor::view(table + u64::from(offset) * 4)
+                && r != 0
+            {
+                any |= crate::ambient::clear_march(list, r as This);
+            }
+        }
+        if any {
+            self.host_pipeline = 0;
+            self.host_roots = [0; 2];
+            self.host_heaps_set = false;
+        }
+    }
+
     /// The stand-in for the indirect light after a dispatch of `p`
     /// (`crate::ambient`). Whether it recorded anything.
     fn ambient(&self, list: &HostList, p: &HostPipeline, role: crate::ambient::Role) -> bool {
-        use crate::ambient::{AIR, DEPTH, LIGHT, RADIANCE, Role, Views};
+        use crate::ambient::{AIR, LIGHT, RADIANCE, Role};
+        match role {
+            // Every image of the resolve that is named (`VICTORY_AMBIENT_SLOTS`).
+            Role::Resolve => crate::ambient::light_slots()
+                .iter()
+                .fold(false, |any, &offset| self.ambient_at(list, p, role, (LIGHT.0, offset)) | any),
+            Role::Radiance => self.ambient_at(list, p, role, RADIANCE),
+            Role::Air => self.ambient_at(list, p, role, AIR),
+            // (Before its dispatch: `State::march`.)
+            Role::March => false,
+        }
+    }
+
+    /// [`State::ambient`] for the image at `at`.
+    fn ambient_at(&self, list: &HostList, p: &HostPipeline, role: crate::ambient::Role, at: (u8, u32)) -> bool {
+        use crate::ambient::{DEPTH, Role, Views};
         let Some(t) = p.stages.first().map(|s| s.translated()) else {
             return false;
         };
@@ -3621,19 +3737,14 @@ impl State {
             let host = crate::resource::host_resource(resource as This)?;
             // SAFETY: a live resource.
             let desc = unsafe { host.GetDesc() };
-            Some((desc, heap.gpu_handle((start + offset * 4) / 32)))
-        };
-        let at = match role {
-            Role::Resolve => LIGHT,
-            Role::Radiance => RADIANCE,
-            Role::Air => AIR,
+            Some((desc, heap.gpu_handle((start + offset * 4) / 32), resource))
         };
         let image = entry(ResourceType::Uav, at);
         let depth = match role {
             Role::Resolve => entry(ResourceType::Srv, DEPTH),
-            Role::Radiance | Role::Air => image,
+            Role::Radiance | Role::Air | Role::March => image,
         };
-        let (Some((of, image)), Some((seen, depth))) = (image, depth) else {
+        let (Some((of, image, _resource)), Some((seen, depth, _))) = (image, depth) else {
             once!(?role, "no stand-in for the indirect light: other tables");
             return false;
         };
@@ -3644,12 +3755,18 @@ impl State {
             once!(?role, format = of.Format.0, "no stand-in for the indirect light: another image");
             return false;
         }
-        crate::ambient::after(list, role, &Views {
+        let ran = crate::ambient::after(list, role, &Views {
             image,
             depth,
             size: [of.Width as u32, of.Height],
             slices: u32::from(of.DepthOrArraySize),
-        })
+        });
+        #[cfg(feature = "diagnostics")]
+        if ran {
+            crate::capture::note_target(_resource as This);
+            list.note_op(|| format!("ambient {role:?} target={_resource:#x}"));
+        }
+        ran
     }
 
     /// What a draw or dispatch runs, for the device-removed report
@@ -4781,6 +4898,8 @@ impl State {
                 (bounded, 0)
             }
         };
+        // (After the clamp of the arguments, which has its own pipeline.)
+        self.march(list, p);
         let ran = match kind {
             DRAW | INDEXED => self.prepare(list, kind == INDEXED),
             MESH => self.prepare_for(list, false, true),

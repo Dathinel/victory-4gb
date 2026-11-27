@@ -64,6 +64,9 @@ pub(crate) struct Shader {
     /// Its part in the stand-in for the indirect light.
     #[cfg(windows)]
     pub(crate) ambient: Option<crate::ambient::Role>,
+    /// Named for skin, with `VICTORY_SKIN_FILL` on (`crate::ambient::skin`).
+    #[cfg(windows)]
+    pub(crate) skin: bool,
     #[cfg(windows)]
     translated: OnceLock<Option<Translated>>,
 }
@@ -116,6 +119,8 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
                 container: bytes.to_vec(),
                 #[cfg(windows)]
                 ambient: (stage == "compute").then(|| crate::ambient::role(bytes)).flatten(),
+                #[cfg(windows)]
+                skin: crate::ambient::skin(bytes),
                 #[cfg(windows)]
                 translated: OnceLock::new(),
             })

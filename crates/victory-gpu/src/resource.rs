@@ -1529,6 +1529,13 @@ fn fills(desc: &ResourceDesc) -> bool {
 /// texel for texel. Shaders see the texture at half the size per level
 /// left out: views shift their levels ([`shift_levels`]), and copies
 /// between such a texture and another are skipped (`list.rs` `unlike`).
+///
+/// `VICTORY_TEXTURE_KEEP_SIDE=<texels>`: no texture is taken below that
+/// many texels on its longer side ([`levels_above`]), so the largest give
+/// up the most and those at or under it keep every level. On a 4 GB card
+/// the title's textures stop at about 840 MB whatever is waiting: this
+/// spends those bytes on the smaller textures (characters, props) whole
+/// and on the largest reduced.
 #[cfg(windows)]
 pub(crate) fn drop_levels(desc: &ResourceDesc) -> u32 {
     const TEXTURE_2D: u32 = 3;
@@ -1543,13 +1550,38 @@ pub(crate) fn drop_levels(desc: &ResourceDesc) -> u32 {
     if n == 0 || !fills(desc) || desc.dimension != TEXTURE_2D || desc.depth_or_array_size != 1 || desc.sample_count > 1 || desc.mip_levels < 5 {
         return 0;
     }
-    let n = n.min(u32::from(desc.mip_levels).saturating_sub(1));
+    static KEEP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let keep = *KEEP.get_or_init(|| {
+        std::env::var("VICTORY_TEXTURE_KEEP_SIDE").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0)
+    });
     let (w, h) = (desc.width, u64::from(desc.height));
+    let n = levels_above(n.min(u32::from(desc.mip_levels).saturating_sub(1)), w.max(h), keep);
     let whole = |side: u64| side % (4 << n) == 0;
     if n == 0 || w.min(h) < 512 || !whole(w) || !whole(h) {
         return 0;
     }
     n
+}
+
+/// Of `n` levels, how many a texture `longer` texels long can give up and
+/// stay at least `keep` texels long (`keep` 0: all `n`).
+fn levels_above(n: u32, longer: u64, keep: u64) -> u32 {
+    match keep {
+        0 => n,
+        keep => n.min((longer / keep).checked_ilog2().unwrap_or(0)),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn a_kept_side_bounds_the_levels_dropped() {
+    assert_eq!(levels_above(2, 4096, 0), 2);
+    assert_eq!(levels_above(2, 4096, 1024), 2);
+    assert_eq!(levels_above(2, 2048, 1024), 1);
+    assert_eq!(levels_above(2, 1024, 1024), 0);
+    assert_eq!(levels_above(2, 512, 1024), 0);
+    assert_eq!(levels_above(4, 8192, 1024), 3);
+    assert_eq!(levels_above(1, 3000, 1024), 1);
 }
 
 /// [`drop_levels`] of title resource `this`; 0 for buffers and null.

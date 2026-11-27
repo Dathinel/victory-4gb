@@ -114,6 +114,11 @@ struct Last {
     asked: u64,
     /// The frame a partly mapped texture was last read in.
     partial: Option<u64>,
+    /// The last read of a partly mapped texture found nothing but zeros: it
+    /// is the one a streaming arrival changes next, so it is looked at again
+    /// after [`zero_relook_frames`] rather than after thirty (character skins
+    /// stayed black for seconds on an 8 GB card).
+    zero: bool,
     /// Until this frame a guarded texture is hashed at every check: its
     /// first checks, and after the hash found a change the guard had not
     /// seen ([`hot_textures`]). 0: not checked under the guard yet.
@@ -139,6 +144,17 @@ const HOT_FRAMES: u64 = 64;
 fn hot_textures() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_HOT").is_none_or(|v| v != "0"))
+}
+
+/// `VICTORY_ZERO_RELOOK_FRAMES=<n>`: frames until a partly mapped texture
+/// that read nothing but zeros is read again (30 when unset, as any other
+/// partly mapped texture; 2 is what 星记's c341046 had, which its author
+/// reverted minutes later without saying why, hence the switch).
+fn zero_relook_frames() -> u64 {
+    static SET: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SET.get_or_init(|| {
+        std::env::var("VICTORY_ZERO_RELOOK_FRAMES").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(30)
+    })
 }
 
 // SAFETY: the staging mapping is written only at submission, under
@@ -1367,7 +1383,8 @@ impl Staging {
             // unmapped pages is slow, and nothing tells us when pages
             // arrive): a mip that streams in shows up to 30 frames late.
             let frame = crate::frame::current();
-            if !exact && last.partial.is_some_and(|at| frame < at + 30) {
+            let every = if last.zero { zero_relook_frames() } else { 30 };
+            if !exact && last.partial.is_some_and(|at| frame < at + every) {
                 return 0;
             }
             last.partial = Some(frame);
@@ -1381,8 +1398,10 @@ impl Staging {
                 }
                 last.hash = Some(hash);
                 if read.iter().all(|&b| b == 0) {
+                    last.zero = true;
                     return false;
                 }
+                last.zero = false;
                 self.detile(read);
                 true
             });

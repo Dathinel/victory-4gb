@@ -69,9 +69,16 @@ fn guest(threads: u32) -> NativeProgram {
 
     // Wave 0 first reads lane 40 and then lane 20. Wave 1 selects lane 24
     // and then lane 36, so the same instruction selects opposite halves.
+    // Alternate the elected half by wave parity for groups with four waves.
+    let selector = if threads == 256 {
+        words.push(alu(0x1B, 8, k(1), 1)); // v8 = wave index & 1
+        8
+    } else {
+        1
+    };
     for (threshold, op, scalar, dest) in [(39, 0x26, 6, 6), (19, 0x25, 7, 9)] {
         words.extend([
-            alu(0x1A, 14, k(4), 1),
+            alu(0x1A, 14, k(4), selector),
             alu(op, 14, k(threshold), 14),
             sop1(4, 24, EXEC),
             cmp(0xD1, v(14), 2),               // v_cmpx_lt_u32 threshold, lane
@@ -88,12 +95,13 @@ fn guest(threads: u32) -> NativeProgram {
         alu(0x1D, 14, k(32), 0),
         alu(0x1A, 14, k(2), 14),
     ]);
+    let counter_bytes = (threads / 64 * 4).max(8);
     let [op, args] = ds(0x0D, 0, 10, 4);
-    words.extend([op | 8, args]);
+    words.extend([op | counter_bytes, args]);
     let [op, args] = ds(0x36, 10, 14, 0);
-    words.extend([op | 8, args]);
+    words.extend([op | counter_bytes, args]);
 
-    if threads == 128 {
+    if threads >= 128 {
         words.extend([0xBF8A_0000, alu(0x1D, 14, k(4), 11)]); // s_barrier, then other wave's LDS
         words.extend(ds(0x36, 7, 14, 0));
     } else {
@@ -135,7 +143,7 @@ fn guest(threads: u32) -> NativeProgram {
             })
             .collect(),
         io: StageIo::Cs(ComputeIo {
-            rsrc2: 5 << 1 | 2 << 15, // s0..s4 and 1 KiB of LDS
+            rsrc2: 5 << 1 | ((counter_bytes + threads * 4).div_ceil(512).max(2) << 15),
             threads: [threads, 1, 1],
         }),
         code: words.into_iter().flat_map(u32::to_le_bytes).collect(),
@@ -150,9 +158,9 @@ fn oracle(threads: u32, thread: u32) -> [u32; OUTPUTS] {
     [
         lane_sum(lane),
         wave_total(wave),
-        lane_sum([40, 24][wave as usize]),
-        lane_sum([20, 36][wave as usize]),
-        wave_total(if threads == 128 { 1 - wave } else { wave }),
+        lane_sum([40, 24][(wave & 1) as usize]),
+        lane_sum([20, 36][(wave & 1) as usize]),
+        wave_total(if threads >= 128 { wave ^ 1 } else { wave }),
         lane_sum(lane ^ 32),
         thread,
     ]
@@ -258,8 +266,8 @@ fn run(threads: u32) {
         .expect("pipeline state validation");
     assert_eq!(
         u32_at(psv.data, 40).unwrap(),
-        threads / 2,
-        "physical thread count"
+        threads,
+        "the split-wave backend retains one physical thread per guest thread"
     );
     eprintln!(
         "{threads} guest threads: {OUTPUTS} UAVs match CPU, guards intact, no D3D12 warnings/errors"
@@ -277,4 +285,10 @@ fn wave64_auto_group_64() {
 #[ignore = "requires a wave32 GPU, Graphics Tools, and DXIL validator"]
 fn wave64_auto_group_128() {
     run(128);
+}
+
+#[test]
+#[ignore = "requires a wave32 GPU, Graphics Tools, and DXIL validator"]
+fn wave64_auto_group_256() {
+    run(256);
 }

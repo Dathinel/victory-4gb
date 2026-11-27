@@ -935,6 +935,9 @@ fn partial_group_wave64_on_wave32_assigns_every_thread_once() {
             );
         }
         eprintln!("Verified {groups} hardware groups of {threads} threads");
+    }
+}
+
 #[test]
 fn scatter_selects_the_highest_active_sender_per_half() {
     let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
@@ -984,6 +987,9 @@ fn scatter_selects_the_highest_active_sender_per_half() {
                 assert_eq!(got, want, "threads={threads} active={active} collide={collide} twice={twice}");
             }
         }
+    }
+}
+
 /// v5 starts as the thread ID and v6 as 42. After their swap, the first lane
 /// of v6 is thread zero for the entire guest wave. Adding lane 63 makes every
 /// expected store nonzero and keeps the full-wave exchange live.

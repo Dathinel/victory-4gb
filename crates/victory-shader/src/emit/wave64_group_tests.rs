@@ -92,16 +92,16 @@ fn guest(threads: u32) -> NativeProgram {
     // opposite half. The guest needs ordering within its wave without s_barrier.
     words.extend([
         alu(0x1A, 10, k(2), 0),
-        alu(0x1D, 14, k(32), 0),
+        alu(0x1D, 14, k(if threads % 64 == 48 { 8 } else { 32 }), 0),
         alu(0x1A, 14, k(2), 14),
     ]);
-    let counter_bytes = (threads / 64 * 4).max(8);
+    let counter_bytes = (threads.div_ceil(64) * 4).max(8);
     let [op, args] = ds(0x0D, 0, 10, 4);
     words.extend([op | counter_bytes, args]);
     let [op, args] = ds(0x36, 10, 14, 0);
     words.extend([op | counter_bytes, args]);
 
-    if threads >= 128 {
+    if threads > 64 {
         words.extend([0xBF8A_0000, alu(0x1D, 14, k(4), 11)]); // s_barrier, then other wave's LDS
         words.extend(ds(0x36, 7, 14, 0));
     } else {
@@ -154,14 +154,14 @@ fn oracle(threads: u32, thread: u32) -> [u32; OUTPUTS] {
     let wave = thread / 64;
     let lane = thread % 64;
     let lane_sum = |lane| lane * (1 + (lane % 4) + wave);
-    let wave_total = |wave| (0..64).map(|lane| 1 + lane % 4 + wave).sum();
+    let wave_total = |wave| (0..(threads - wave * 64).min(64)).map(|lane| 1 + lane % 4 + wave).sum();
     [
         lane_sum(lane),
         wave_total(wave),
         lane_sum([40, 24][(wave & 1) as usize]),
         lane_sum([20, 36][(wave & 1) as usize]),
-        wave_total(if threads >= 128 { wave ^ 1 } else { wave }),
-        lane_sum(lane ^ 32),
+        wave_total(if threads > 64 { wave ^ 1 } else { wave }),
+        lane_sum(lane ^ if threads % 64 == 48 { 8 } else { 32 }),
         thread,
     ]
 }
@@ -291,4 +291,16 @@ fn wave64_auto_group_128() {
 #[ignore = "requires a wave32 GPU, Graphics Tools, and DXIL validator"]
 fn wave64_auto_group_256() {
     run(256);
+}
+
+#[test]
+#[ignore = "requires a wave32 GPU, Graphics Tools, and DXIL validator"]
+fn wave64_partial_group_48() {
+    run(48);
+}
+
+#[test]
+#[ignore = "requires a wave32 GPU, Graphics Tools, and DXIL validator"]
+fn wave64_partial_group_112() {
+    run(112);
 }

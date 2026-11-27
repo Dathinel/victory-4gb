@@ -107,8 +107,22 @@ fn guest(threads: u32) -> NativeProgram {
     } else {
         words.push(mov(7, v(5)));
     }
+    program(
+        threads,
+        (counter_bytes + threads * 4).div_ceil(512).max(2),
+        words,
+        [4, 5, 6, 9, 7, 10, 0],
+    )
+}
+
+fn program(
+    threads: u32,
+    lds_blocks: u32,
+    mut words: Vec<u32>,
+    registers: [u32; OUTPUTS],
+) -> NativeProgram {
     words.extend([alu(0x1A, 15, k(2), 0), 0xBE85_0380]); // output offset and table address high
-    for (slot, reg) in [4, 5, 6, 9, 7, 10, 0].into_iter().enumerate() {
+    for (slot, reg) in registers.into_iter().enumerate() {
         words.extend([
             0x3D << 26 | 0x02 << 18 | 8 << 6 | 2, // s_load_dwordx4 s[8:11], s[4:5]
             125 << 25 | (slot as u32 * 32),
@@ -143,7 +157,7 @@ fn guest(threads: u32) -> NativeProgram {
             })
             .collect(),
         io: StageIo::Cs(ComputeIo {
-            rsrc2: 5 << 1 | ((counter_bytes + threads * 4).div_ceil(512).max(2) << 15),
+            rsrc2: 5 << 1 | (lds_blocks << 15),
             threads: [threads, 1, 1],
         }),
         code: words.into_iter().flat_map(u32::to_le_bytes).collect(),
@@ -196,6 +210,10 @@ fn debug_warnings(queue: &ID3D12InfoQueue) -> Vec<String> {
 }
 
 fn run(threads: u32) {
+    run_program(threads, guest(threads), oracle);
+}
+
+fn run_program(threads: u32, program: NativeProgram, expected: fn(u32, u32) -> [u32; OUTPUTS]) {
     static DEBUG: std::sync::Once = std::sync::Once::new();
     // SAFETY: These opt-in tests run in isolation and enable the debug layer
     // before creating the first device in the test process.
@@ -228,7 +246,7 @@ fn run(threads: u32) {
     // Use the same host capability as the runtime and enter through the
     // public translator. Neither the paired form nor a wave override is used.
     super::set_host_max_wave(caps.WaveLaneCountMax);
-    let bytes = crate::native::tests::compute_uav_container(&guest(threads));
+    let bytes = crate::native::tests::compute_uav_container(&program);
     let mut shader = super::translate(&bytes).expect("translate synthetic wave64 container");
     validator::Validator::load(validator::Validator::default_path().as_deref())
         .expect("DXIL validator")
@@ -262,7 +280,7 @@ fn run(threads: u32) {
         for thread in 0..threads {
             assert_eq!(
                 words[thread as usize],
-                oracle(threads, thread)[slot],
+                expected(threads, thread)[slot],
                 "UAV {slot}, thread {thread}"
             );
         }
@@ -317,4 +335,16 @@ fn wave64_partial_group_112() {
 #[ignore = "requires a wave32 GPU, Graphics Tools, and DXIL validator"]
 fn wave64_missing_half_96() {
     run(96);
+}
+
+#[test]
+#[ignore = "requires a wave32 GPU, Graphics Tools, and DXIL validator"]
+fn wave64_unguarded_first_lane() {
+    // Read the unmasked X thread ID before any cross-lane operation, without guest LDS.
+    let words = vec![0x7E00_0400 | 6 << 17 | v(0), mov(1, 6)];
+    let shader = program(128, 0, words, [1, 0, 1, 0, 1, 0, 1]);
+    run_program(128, shader, |_, id| {
+        let first = id & !63;
+        [first, id, first, id, first, id, first]
+    });
 }

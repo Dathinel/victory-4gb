@@ -10,28 +10,44 @@ video memory and measured there:
 **This repository contains no game files, code or assets.** You need your own copy of the game. It is
 not affiliated with or endorsed by the game's developer or publisher.
 
-## Where it stands (26 November 2026)
+## Where it stands (27 November 2026)
 
-On the machine above, branch `coolfox-4gb`, one 40-minute session played with an Xbox controller:
-from the first scene through the first mission and its chase to the boat mission in the open world,
-with no crash and no device loss. Median 4.0 fps over the session (423 one-second
-readings); in separate runs since, 5.2 to 7.0 fps in the open-world boat scene with the title's own
-upscaler at half scale (4.4 to 4.5 without), and 5.2 to 5.5 fps in the first room.
+On the machine above, branch `coolfox-4gb`:
 
-- **Good:** daylight outdoors. Sky, water, vegetation, vehicles, characters and faces in the boat
-  mission and its cutscene, the minimap and the interface.
-- **Not good yet:** speed (4 to 5 fps); interiors and night (dark rooms, characters as silhouettes
-  with burned edges); characters' skin baked black or flat in some runs (a fix is in, see below).
+- **It plays through.** One 40-minute session with an Xbox controller, from the first scene
+  through the first mission and its chase to the boat mission in the open world, with no crash and
+  no device loss (median 4.0 fps then, before the gains below).
+- **6.5 to 7 fps in open-world free play** now (5.9 to 7.3 over three runs; 150 ms a frame), against
+  4.1 to 4.9 a day earlier. Two thirds of the card's time went to work that only serves ray
+  tracing, which does not run on this card; a per-pass GPU profile found it and a skip list removes
+  it (issue #4).
+- **Characters, clothes and props are there**: on a 4 GB card the tree admitted about 5,500
+  textures and then no more; at a quarter of their size about 10,000 fit in the same memory
+  (issue #3).
+- **The fog veil over interiors is gone** in three runs of three (issue #2, pull request #15).
 
-So: it can be played through, slowly, on a 4 GB laptop card. It is not finished, and pull requests
-are what would move it fastest: see [Contributing](#contributing).
+To start it with all of that: `scripts\play-4gb.ps1 -Exe <your game executable>` on `coolfox-4gb`
+(`-Quality low|medium|high`, `-TextureScale 1|0.5|0.25`, `-Show` to see what it would set).
+
+**Not good yet**
+
+- Speed: the CPU side of a frame (65 ms preparing, 26 ms copying back) is the limit now.
+- The first scene while it loads: full-white captures and untextured stand-in characters in some
+  runs. Fast cuts in cutscenes outrun the texture upload.
+- Water differs between identical runs: waves, a flat mirror, or white all over (issue #21).
+- Interiors and night are clean but dark: indirect light is still missing.
+- Five compute programs do not translate for 32-lane waves (three of them water volumetrics).
+
+It is not finished, and pull requests are what would move it fastest: see
+[Contributing](#contributing). If you have a 4 to 8 GB card, a run of yours with the numbers the
+log prints is a contribution: the form is under Issues.
 
 ## The two branches
 
 | Branch | What it is | In the first gameplay scene, on this card | Picture |
 |---|---|---|---|
 | `main` | [fxceless/victory-fork](https://github.com/fxceless/victory-fork) `main` + pull requests and ports listed below | **5.4 to 6.7 fps** (145 to 185 ms a frame at about 4,400 draws) | clothes lit by the added ambient light, window glass right; skin and rooms still too dark |
-| `coolfox-4gb` | codec-d's `cool_fox` at `f4b48ad` (the leading public build on PortWatch until it was taken down) + the render-scale port | **5.2 to 5.5 fps** (184 to 192 ms) with the switch set below; 2.4 to 2.5 fps (400 to 418 ms) with its own NVIDIA launcher's set | the best here: face, neck, hair, clothes and walls lit; with the ray-tracing passes skipped the room is lit warm and the haze is gone (one run); daylight outdoors right |
+| `coolfox-4gb` | codec-d's `cool_fox` at `f4b48ad` (the leading public build on PortWatch until it was taken down) + the render-scale port | **6.5 to 7 fps** in open-world free play (150 ms a frame) with the set below, 5.2 to 5.5 in the first room before the last gains; 2.4 to 2.5 fps (400 to 418 ms) with its own NVIDIA launcher's set | the best here: face, neck, hair, clothes and walls lit; with the ray-tracing passes skipped the room is lit warm and the haze is gone (one run); daylight outdoors right |
 
 The two are not merged. A trial merge stops on 39 files and about 300 hunks, most of them in
 `crates/victory-gpu/src` (`host.rs` 91, `draw.rs` 39, `indirect.rs` 30, `descriptor/host.rs` 26,
@@ -66,7 +82,8 @@ VICTORY_INDIRECT_BATCH=2 VICTORY_NAN_SCRUB=1 VICTORY_TEXTURE_DROP_MIPS=2 VICTORY
 VICTORY_UPSCALER=6 VICTORY_RENDER_SCALE=0.5 VICTORY_AMBIENT_SETTLE=250,3 VICTORY_AMBIENT_MARCH=3
 ```
 
-(with `VICTORY_SKIP_PIPELINES` set to the list in `scripts/rt_off_hashes.txt`.)
+(with `VICTORY_SKIP_PIPELINES` set to the lists in `scripts/rt_off_hashes.txt` and
+`scripts/rt_work_off_hashes.txt` of `coolfox-4gb`; `scripts/play-4gb.ps1` there sets all of it.)
 
 184 to 192 ms a frame (98 to 111 ms on the GPU, 65 to 67 ms preparing), 5.2 to 5.5 fps, about
 3,350 of 3,300 MB of card memory budgeted, no banding from the dropped texture level

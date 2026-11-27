@@ -3780,6 +3780,12 @@ impl State {
             return kind;
         };
         let mut text = format!("{kind} {}", p.name);
+        // The timing report groups by command and pipeline. Full captures also need the bindings.
+        if crate::host::batch_timing() && !crate::host::dred_on()
+            && crate::capture::folder().is_none() && !crate::capture::world_on()
+        {
+            return text;
+        }
         // What it draws into (a dispatch writes through its views below).
         if !compute {
             let described = |t: usize| {

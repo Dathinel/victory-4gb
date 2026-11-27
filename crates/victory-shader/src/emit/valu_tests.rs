@@ -263,6 +263,31 @@ fn run_cases_on(
 }
 
 #[test]
+fn ds_swizzle_reads_only_active_compute_lanes() {
+    let value = 0xdead_beef;
+    for (offset, threads, narrow, expected) in [
+        (0x041f, 1, false, 0), // bitmask-mode swap adjacent lanes (lane 1 absent)
+        (0x041f, 2, true, 0),  // bitmask-mode swap adjacent lanes (lane 1 masked by EXEC)
+        (0x80b1, 2, true, 0),  // quad-mode swap adjacent lanes (lane 1 masked by EXEC)
+        (0x041f, 2, false, value),
+        (0x80b1, 2, false, value),
+    ] {
+        let mut words = vec![vop1(0x001, 5, 128)];
+        if narrow {
+            words.push(0x7DA4_0080); // v_cmpx_eq_u32 0, v0 (local thread ID)
+        }
+        words.extend([0xD8D4_0000 | offset, 0x0500_0001]); // ds_swizzle_b32 v5, v1
+        // Only one lane writes the output, even if both ran the swizzle.
+        words.extend([0x7DA4_0080, vop1(0x001, 0, vgpr(5))]);
+        let shader = build_cs(&words, threads, 0);
+        // WARP cannot create this shader's fixed WaveSize(32) pipeline on SM 6.6.
+        run_cases_on(&shader, &[[value, 0, 0, 0]], &[("hardware", false)], |_, _, _, got| {
+            assert_eq!(got, expected, "offset {offset:#x}, {threads} threads, narrowed {narrow}");
+        });
+    }
+}
+
+#[test]
 fn scalar_quad_masks_pack_nibbles_and_set_scc() {
     let pack_words = |opcode: u32| {
         [
@@ -1810,6 +1835,20 @@ fn v_cvt_f32_f64_matches_ieee754() {
 
 #[test]
 fn whole_wave_f64_sum_and_cvt_f32_f64() {
+    for threads in [4, 32, 33, 64, 65] {
+        check_wave_f64_sum(threads, false);
+    }
+}
+
+#[test]
+#[ignore = "requires wave32-capable D3D12 hardware"]
+fn guest_wave64_f64_sum_crosses_host_halves() {
+    for threads in [4, 32, 33, 64, 65, 96, 128] {
+        check_wave_f64_sum(threads, true);
+    }
+}
+
+fn check_wave_f64_sum(threads: u32, wave64: bool) {
     let s_or_saveexec_b32 =
         |sdst: u8, src0: u8| 0xBE80_0000 | (sdst as u32) << 16 | 0x3D << 8 | src0 as u32;
     let v_mov_dpp8 = |vdst: u8, vsrc: u8, sel: u32| [vop1(0x001, vdst, 0xE9), vsrc as u32 | (sel << 8)];
@@ -1823,11 +1862,24 @@ fn whole_wave_f64_sum_and_cvt_f32_f64() {
     let mut words = Vec::new();
     words.push(s_mov_b32(5, 0x80));
     words.extend_from_slice(&s_load_dwordx4(8, 4));
+    words.push(0x3414_0082); // v_lshlrev_b32 v10, 2, v0: output byte offset
     // Per-lane f64 input in v[6:7] = (s0, s1).
     words.push(vop1(0x001, 6, sgpr(0)));
     words.push(vop1(0x001, 7, sgpr(1)));
-    // Whole-wave f64 sum over Wave32 with s_mov_b32 copy before EXEC restore.
-    words.push(s_or_saveexec_b32(12, 0xC1));
+    if wave64 {
+        // Threads 0..32 and 96..128 take the first input. This distinguishes
+        // a true exchange from adding either host wave's subtotal to itself.
+        words.push(vop1(0x001, 4, sgpr(2)));
+        words.push(vop1(0x001, 5, sgpr(3)));
+        words.push(0x7D88_00A0); // v_cmp_gt_u32 vcc, 32, v0
+        words.extend_from_slice(&vop3(0x101, 6, vgpr(4), vgpr(6), sgpr(106)));
+        words.extend_from_slice(&vop3(0x101, 7, vgpr(5), vgpr(7), sgpr(106)));
+        words.extend_from_slice(&[0x7D88_00FF, 96]); // v_cmp_gt_u32 vcc, 96, v0
+        words.extend_from_slice(&vop3(0x101, 6, sgpr(0), vgpr(6), sgpr(106)));
+        words.extend_from_slice(&vop3(0x101, 7, sgpr(1), vgpr(7), sgpr(106)));
+    }
+    // Reduce each 32-lane half before combining halves for a guest wave64.
+    words.push(if wave64 { 0xBE8C_25C1 } else { s_or_saveexec_b32(12, 0xC1) });
     words.extend_from_slice(&vop3(0x101, 2, 0x80, vgpr(6), sgpr(12)));
     words.extend_from_slice(&vop3(0x101, 3, 0x80, vgpr(7), sgpr(12)));
     for sel in [14570689u32, 9658386, 2340] {
@@ -1841,19 +1893,26 @@ fn whole_wave_f64_sum_and_cvt_f32_f64() {
     words.extend_from_slice(&vop3(0x378, 4, vgpr(2), 0x80, 0x80)); // v_permlanex16_b32
     words.extend_from_slice(&vop3(0x378, 5, vgpr(3), 0x80, 0x80));
     words.extend_from_slice(&vop3(0x164, 2, vgpr(4), vgpr(2), 0));
+    if wave64 {
+        // Read the upper half's subtotal and add it to the lower half's subtotal.
+        words.extend_from_slice(&vop3(0x360, 18, vgpr(2), 0xA0, 0));
+        words.extend_from_slice(&vop3(0x360, 19, vgpr(3), 0xA0, 0));
+        words.extend_from_slice(&vop3(0x164, 2, sgpr(18), vgpr(2), 0));
+    }
     words.extend_from_slice(&vop3(0x360, 14, vgpr(2), 0x80, 0)); // v_readlane_b32 s14, v2, 0
     words.extend_from_slice(&vop3(0x360, 15, vgpr(3), 0x80, 0)); // v_readlane_b32 s15, v3, 0
     words.push(s_mov_b32(16, 14));
     words.push(s_mov_b32(17, 15));
-    words.push(s_mov_b32(126, 12)); // restore exec_lo
+    words.push(if wave64 { 0xBEFE_040C } else { s_mov_b32(126, 12) }); // restore the saved EXEC mask
     words.push(vop1(0x00f, 0, sgpr(16))); // v_cvt_f32_f64 v0, s[16:17]
-    words.extend_from_slice(&buffer_store_dword(0, 8, 0));
+    let [op, args] = buffer_store_dword(0, 8, 0);
+    words.extend_from_slice(&[op | (1 << 12), args | 10]); // offen v10
     words.push(S_ENDPGM);
 
     let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     let native = NativeProgram {
         stage: HwStage::Cs,
-        wave64: false,
+        wave64,
         vgprs: 12,
         layout: vec![
             RootParam {
@@ -1885,7 +1944,7 @@ fn whole_wave_f64_sum_and_cvt_f32_f64() {
         }],
         io: StageIo::Cs(ComputeIo {
             rsrc2: 5 << 1,
-            threads: [4, 1, 1],
+            threads: [threads, 1, 1],
         }),
         code,
     };
@@ -1895,6 +1954,7 @@ fn whole_wave_f64_sum_and_cvt_f32_f64() {
     let res =
         resource::track(&p, &native.layout, native.stage, Some(&st)).expect("resource::track");
     let io = io::raise(&p, &native).expect("io::raise");
+    let saved_width = lower::TEST_HOST_WAVE.replace(if wave64 { Some(32) } else { lower::TEST_HOST_WAVE.get() });
     let lowered = lower::lower(&lower::Parts {
         native: &native,
         p: &p,
@@ -1905,8 +1965,9 @@ fn whole_wave_f64_sum_and_cvt_f32_f64() {
         outputs: Vec::new(),
         prims: Vec::new(),
         mesh_stride: 0,
-    })
-    .expect("lower");
+    });
+    lower::TEST_HOST_WAVE.set(saved_width);
+    let lowered = lowered.expect("lower");
 
     let shader = HostShader {
         stage: HwStage::Cs,
@@ -1924,10 +1985,11 @@ fn whole_wave_f64_sum_and_cvt_f32_f64() {
         v.validate(&mut copy).expect("DXIL validation failed");
     }
 
-    let cases: &[(f64, f32)] = &[(1.25, 5.0), (-0.75, -3.0)];
+    let cases = [1.25_f64, -0.75];
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     for (label, warp) in [("hardware", false), ("warp", true)] {
         let Ok(host) = Host::new(warp) else {
+            assert!(!wave64 || warp, "explicit wave64 test requires a wave32 hardware adapter");
             continue;
         };
         let (root, pso) = match host.compute_pipeline(&shader) {
@@ -1939,9 +2001,10 @@ fn whole_wave_f64_sum_and_cvt_f32_f64() {
             }
             Err(e) => panic!("{label}: compute_pipeline failed: {e}"),
         };
-        for &(x, want) in cases {
+        for x in cases {
             let b = x.to_bits();
-            let inputs = [b as u32, (b >> 32) as u32, 0, 0];
+            let other = (-2.0 * x).to_bits();
+            let inputs = [b as u32, (b >> 32) as u32, other as u32, (other >> 32) as u32];
             let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
             for u in &shader.user_data {
                 ud[u.index as usize] = match (u.root, u.slot) {
@@ -1956,19 +2019,26 @@ fn whole_wave_f64_sum_and_cvt_f32_f64() {
                     &pso,
                     &Dispatch {
                         roots: vec![(0, Root::Constants(ud))],
-                        views: &[View::RawUav(1)],
+                        views: &[View::RawUav(threads)],
                         samplers: &[],
                         groups: [1, 1, 1],
                     },
                 )
                 .unwrap_or_else(|e| panic!("{label}: dispatch failed: {e}"));
-            assert_eq!(
-                out[0][0],
-                want.to_bits(),
-                "{label}: wave f64 sum({x}) = {:#010x}, want {:#010x}",
-                out[0][0],
-                want.to_bits(),
-            );
+            assert_eq!(out[0].len(), threads as usize);
+            for (lane, &got) in out[0].iter().enumerate() {
+                let width = if wave64 { 64 } else { 32 };
+                let start = lane as u32 / width * width;
+                let active = (threads - start).min(width);
+                let first = if wave64 {
+                    32u32.saturating_sub(start).min(active) + (start + active).saturating_sub(96)
+                } else {
+                    active
+                };
+                let want = (x * f64::from(first) - 2.0 * x * f64::from(active - first)) as f32;
+                assert_eq!(got, want.to_bits(), "{label}: group {threads}, thread {lane}, input {x}");
+            }
+            eprintln!("{label}: {threads} threads matched for input {x}");
         }
     }
 }

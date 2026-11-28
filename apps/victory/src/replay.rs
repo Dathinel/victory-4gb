@@ -450,6 +450,7 @@ fn replay_host(wave: Option<&std::ffi::OsStr>, rdna: Option<&std::ffi::OsStr>) -
     Ok((width.unwrap_or(64), rdna))
 }
 
+/// Translates the capture's shaders into `into`.
 fn retranslate(folder: &std::path::Path, into: &std::path::Path, view_limit: u32, raw_views: u32) -> Result<()> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let wave = std::env::var_os("VICTORY_HOST_MAX_WAVE");

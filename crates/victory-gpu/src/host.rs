@@ -2916,6 +2916,9 @@ fn fill_is_titles(src: usize, len: usize) -> bool {
     const SMALL: usize = 64 << 10;
     static ON: OnceLock<bool> = OnceLock::new();
     let on = *ON.get_or_init(|| std::env::var_os("VICTORY_FILL_TITLE").is_some_and(|v| v == "1"));
+    // (A/B-able in one run as `VICTORY_AB=<s>,VICTORY_FILL_TITLE`.)
+    #[cfg(feature = "diagnostics")]
+    let on = crate::ab::pick("VICTORY_FILL_TITLE").unwrap_or(on);
     on && len <= SMALL && (crate::watch::written_since_taken(src, len) || !crate::watch::landed_lately(src, len, 600))
 }
 

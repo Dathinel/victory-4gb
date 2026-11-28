@@ -84,7 +84,7 @@ fn compute(code: &[u32], threads: u32, lds_blocks: u32) -> Vec<u8> {
     container
 }
 
-fn cli(root: &Path, args: &[&str], selected: Option<&str>, dump: &Path) -> String {
+fn cli(root: &Path, args: &[&str], selected: Option<&str>, dump: Option<&Path>) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_victory"));
     for (key, _) in std::env::vars_os() {
         if key
@@ -98,14 +98,17 @@ fn cli(root: &Path, args: &[&str], selected: Option<&str>, dump: &Path) -> Strin
     if let Some(key) = selected {
         cmd.env("VICTORY_WAVE_PAIRS_ONLY", key);
     }
+    if let Some(dir) = dump {
+        cmd.env("VICTORY_EMIT_DUMP", dir);
+    }
+    let process_dir = tempfile::tempdir_in(root).unwrap();
     let output = cmd
-        .current_dir(root)
+        .current_dir(process_dir.path())
         .args(args)
         .env("VICTORY_HOST_MAX_WAVE", "32")
         .env("VICTORY_HOST_RDNA", "0")
-        .env("VICTORY_CACHE_DIR", root.join("cache"))
+        .env("VICTORY_CACHE_DIR", process_dir.path().join("cache"))
         .env("VICTORY_DATA_DIR", root.join("data"))
-        .env("VICTORY_EMIT_DUMP", dump)
         .output()
         .unwrap();
     assert!(
@@ -119,8 +122,9 @@ fn cli(root: &Path, args: &[&str], selected: Option<&str>, dump: &Path) -> Strin
 fn translate(root: &Path, inputs: &[&str], selected: Option<&str>) -> (Vec<Vec<u8>>, String) {
     let dump = tempfile::tempdir_in(root).unwrap();
     let mut args = vec!["translate", "--list", "--jobs", "1"];
-    args.extend_from_slice(inputs);
-    let report = cli(root, &args, selected, dump.path());
+    let paths: Vec<_> = inputs.iter().map(|p| root.join(p)).collect();
+    args.extend(paths.iter().map(|p| p.to_str().unwrap()));
+    let report = cli(root, &args, selected, Some(dump.path()));
     let mut files = Vec::new();
     for entry in fs::read_dir(dump.path()).unwrap() {
         let path = entry.unwrap().path();
@@ -180,13 +184,24 @@ fn replay_and_translate_select_the_same_wave32_form() {
     fs::write(root.join("capture-1/frame.bin"), frame).unwrap();
     let mut outputs = Vec::new();
     for (directory, selected) in [("normal", None), ("paired", Some(key.as_str()))] {
-        let (translation, _) = translate(root, &["s.dxbc"], selected);
+        let (translation, report) = translate(root, &["s.dxbc"], selected);
+        assert!(
+            report
+                .lines()
+                .any(|line| line.contains(&format!("#{key} ")) && line.contains(" Cs  emitted ")),
+            "{report}"
+        );
         assert_eq!(translation.len(), 1);
         cli(
             root,
-            &["replay", "capture-1", "--retranslate", directory],
+            &[
+                "replay",
+                root.join("capture-1").to_str().unwrap(),
+                "--retranslate",
+                root.join(directory).to_str().unwrap(),
+            ],
             selected,
-            root,
+            None,
         );
         let replay = fs::read(root.join(directory).join(format!("{key}.dxil"))).unwrap();
         assert_eq!(translation[0], replay);

@@ -204,6 +204,9 @@ pub fn fingerprint() -> String {
     h.update(&crate::shader_cache::translation());
     if let Some(host) = crate::host::host() {
         h.update(&host.driver().to_le_bytes());
+        if host.software_adapter {
+            h.update(b"warp-bounds-read-v1");
+        }
     }
     h.finalize().to_hex()[..16].to_owned()
 }

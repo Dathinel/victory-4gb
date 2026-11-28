@@ -868,6 +868,25 @@ fn stream_pipeline<S>(
     )
 }
 
+/// WARP requires depth reads for a bounds-only pipeline. ALWAYS with zero writes
+/// keeps the ordinary depth comparison inert while letting the bounds test read.
+fn bounds_stream_state<'a>(
+    device: &ID3D12Device,
+    format: DXGI_FORMAT,
+    mut depth: D3D12_DEPTH_STENCIL_DESC1,
+    name: &'a str,
+) -> (D3D12_DEPTH_STENCIL_DESC1, std::borrow::Cow<'a, str>) {
+    if !depth.DepthEnable.as_bool() && depth.DepthBoundsTestEnable.as_bool()
+        && format != DXGI_FORMAT_UNKNOWN && host().is_some_and(|h| h.software_adapter && &h.device == device)
+    {
+        depth.DepthEnable = true.into();
+        depth.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        depth.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        return (depth, format!("{name}-warp-bounds-read").into());
+    }
+    (depth, name.into())
+}
+
 /// A graphics pipeline enabling the depth bounds test: `D3D12_GRAPHICS_PIPELINE_STATE_DESC`
 /// has no field for `DepthBoundsTestEnable`, so it is created and loaded as a
 /// pipeline-state stream with `DEPTH_STENCIL1`.
@@ -904,6 +923,7 @@ fn graphics_depth_bounds_pipeline(
         RTFormats: d.RTVFormats,
         NumRenderTargets: d.NumRenderTargets,
     };
+    let (depth, name) = bounds_stream_state(device, d.DSVFormat, depth, name);
     let base = Stream {
         root: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, root.as_raw()),
         vs: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS, d.VS),
@@ -921,13 +941,13 @@ fn graphics_depth_bounds_pipeline(
     };
     if d.GS.pShaderBytecode.is_null() {
         let mut stream = base;
-        stream_pipeline(device, &mut stream, name)
+        stream_pipeline(device, &mut stream, &name)
     } else {
         let mut stream = StreamGs {
             base,
             gs: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS, d.GS),
         };
-        stream_pipeline(device, &mut stream, name)
+        stream_pipeline(device, &mut stream, &name)
     }
 }
 
@@ -986,6 +1006,7 @@ fn mesh_pipeline(
         stream_pipeline(device, &mut stream, name)
     };
     if depth_bounds {
+        let (depth, name) = bounds_stream_state(device, g.depth_format, g.depth1(), name);
         let mut stream = Stream {
             root: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, root.as_raw()),
             ms: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS, ms),
@@ -993,7 +1014,7 @@ fn mesh_pipeline(
             blend: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, host_blend(&g.blend, &g.targets)),
             mask: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, g.sample_mask),
             raster: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, g.rasterizer),
-            depth: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1, g.depth1()),
+            depth: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1, depth),
             targets: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS, g.targets),
             dsv: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT, g.depth_format),
             samples: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC, g.samples),
@@ -1002,7 +1023,7 @@ fn mesh_pipeline(
                 D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
             ),
         };
-        stream_pipeline(device, &mut stream, name)
+        stream_pipeline(device, &mut stream, &name)
     } else {
         build(Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL, g.depth))
     }

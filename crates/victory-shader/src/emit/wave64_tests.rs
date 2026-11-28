@@ -1134,6 +1134,7 @@ fn meshlet_1024_lds() {
 fn check_paired_counts(
     native: NativeProgram,
     groups: u32,
+    view: View<'_>,
     counts: &[u32],
     expected: impl Fn(u32, u32) -> u32,
 ) {
@@ -1165,21 +1166,29 @@ fn check_paired_counts(
                 &pipeline,
                 &Dispatch {
                     roots: vec![(0, Root::Constants(constants))],
-                    views: &[View::RawUav(1025)],
+                    views: std::slice::from_ref(&view),
                     samplers: &[],
                     groups: [groups, 1, 1],
                 },
             )
             .unwrap();
         let active = if count == 0 { groups * 1024 } else { count };
-        for (lane, &word) in output[0][..1024].iter().enumerate() {
-            assert_eq!(
-                word,
-                expected(lane as u32, active),
-                "count {count}, lane {lane}"
-            );
+        let channels = match view {
+            View::RawUav(_) => 1,
+            View::TextureUav(_, _) => 4,
+            _ => unreachable!("expected a raw buffer or a float texture"),
+        };
+        assert_eq!(output[0].len(), 1025 * channels);
+        for (lane, values) in output[0].chunks_exact(channels).enumerate() {
+            let want = if lane == 1024 {
+                0
+            } else {
+                expected(lane as u32, active)
+            };
+            for &value in values {
+                assert_eq!(value, want, "count {count}, lane {lane}");
+            }
         }
-        assert_eq!(output[0][1024], 0, "guard word for count {count}");
     }
 }
 
@@ -1199,6 +1208,7 @@ fn paired_partial_groups_only_active_lanes_increment_uav() {
     check_paired_counts(
         native,
         2,
+        View::RawUav(1025),
         &[
             0, 1, 31, 32, 33, 63, 64, 65, 1023, 1024, 1025, 1057, 2047, 2048,
         ],
@@ -1238,7 +1248,36 @@ fn paired_partial_groups_only_active_lanes_increment_lds() {
     check_paired_counts(
         native,
         1,
+        View::RawUav(1025),
         &[0, 1, 31, 32, 33, 63, 64, 65, 511, 512, 513, 1023, 1024],
         |lane, active| if lane < active { active } else { 0 },
+    );
+}
+
+#[test]
+#[ignore = "requires dxil.dll and a Wave32 hardware adapter"]
+fn paired_partial_groups_only_active_lanes_store_texels() {
+    let mut native = native_of(
+        &[
+            0xf40c_0202,
+            0xfa00_0000, // load the eight-dword texture descriptor into s[8:15]
+            0x7e02_0280, // y = 0; x is the local thread id in v0
+            0x7e06_02f2,
+            0x7e08_02f2,
+            0x7e0a_02f2,
+            0x7e0c_02f2, // RGBA = (1, 1, 1, 1)
+            0xf020_1f08,
+            0x0002_0300, // image_store, all four channels
+        ],
+        true,
+        1024,
+    );
+    native.used[0].dwords = 8;
+    check_paired_counts(
+        native,
+        1,
+        View::TextureUav(1025, 1),
+        &[0, 1, 31, 32, 33, 63, 64, 65, 511, 512, 513, 1023, 1024],
+        |lane, active| if lane < active { 1f32.to_bits() } else { 0 },
     );
 }

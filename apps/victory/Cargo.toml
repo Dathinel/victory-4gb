@@ -30,5 +30,9 @@ diagnostics = [
     "victory-shader/diagnostics",
 ]
 
+[dev-dependencies]
+tempfile.workspace = true
+zlib-rs.workspace = true
+
 [lints]
 workspace = true

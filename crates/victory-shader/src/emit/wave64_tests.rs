@@ -22,7 +22,17 @@ fn on_the_card_uav(
     constants: [u32; 2],
     uav_dwords: u32,
 ) -> Option<Vec<u32>> {
-    let Ok(host) = Host::new(false) else {
+    on_adapter_uav(shader, width, constants, uav_dwords, false)
+}
+
+fn on_adapter_uav(
+    shader: &HostShader,
+    width: u32,
+    constants: [u32; 2],
+    uav_dwords: u32,
+    warp: bool,
+) -> Option<Vec<u32>> {
+    let Ok(host) = Host::new(warp) else {
         eprintln!("No hardware device; skipped GPU readback");
         return None;
     };
@@ -1027,4 +1037,247 @@ fn swap_first_lane_broadcast_reaches_both_host_waves() {
     for (thread, &word) in out[0].iter().enumerate() {
         assert_eq!(word, 63, "guest thread {thread}: first lane of swapped ID plus lane 63");
     }
+}
+
+#[test]
+#[ignore = "requires dxil.dll and a Wave32 hardware adapter"]
+fn meshlet_1024_lds() {
+    super::set_host_max_wave(32);
+    let wave64 = true;
+    let bytes = std::env::var("MESH_BYTES")
+        .unwrap_or_else(|_| "32768".into())
+        .parse::<u32>()
+        .unwrap();
+    let offset = bytes - 4096;
+    let width = if wave64 { 64u32 } else { 32 };
+    let body = [
+        0x3408_0082,
+        0x7e02_02ff,
+        width,
+        0x7e04_02ff,
+        bytes - 4,
+        0x7e0a_0280,
+        (0x36 << 26) | (0x0d << 18) | offset,
+        (5 << 8) | 4,
+        0xbf8a0000,
+        0x7e06_02ff,
+        0x55555555,
+        0x360c0000, // v6 = t & s0
+        0x7d880c01, // s1 > v6, elect lane 0
+        if wave64 { 0xbe8c246a } else { 0xbe8c3c6a },
+        0xbf880002,
+        (0x36 << 26) | (0x20 << 18),
+        (3 << 24) | (1 << 8) | 2,
+        if wave64 { 0xbefe040c } else { 0xbefe030c },
+        0x7e0e0503, // v_readfirstlane_b32 s7, v3
+        0x4a060c07, // v3 = base + v6
+        0xbf8a0000,
+        (0x36 << 26) | (0x36 << 18),
+        (5 << 24) | 2,
+        0xe0701000,
+        0x80020304,
+        0x4a0c08ff,
+        4096,
+        0xe0701000,
+        0x80020506,
+    ];
+    let mut native = native_of(&body, wave64, 1024);
+    let StageIo::Cs(ref mut cs) = native.io else {
+        panic!()
+    };
+    cs.rsrc2 |= (bytes / 512) << 15;
+    assert_eq!(cs.lds_bytes(), bytes);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).unwrap();
+    let st = structure::structure(&p).unwrap();
+    let io = io::raise(&p, &native).unwrap();
+    let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+    let c = crate::dxbc::Container {
+        digest: [0; 16],
+        version: (1, 0),
+        parts: vec![],
+    };
+    let sh = super::emit_selected(&c, &native, &p, &st, &io, &res, true).expect("translation");
+    let mut validator = validator::Validator::load(validator::Validator::default_path().as_deref())
+        .expect("validator");
+    validator
+        .validate(&mut sh.dxil.clone())
+        .expect("DXIL validation");
+    for trial in 0..4 {
+        let warp = std::env::var("VICTORY_WARP").as_deref() == Ok("1");
+        let got = on_adapter_uav(&sh, 32, [width - 1, 1], 2049, warp).expect("Wave32 adapter required");
+        eprintln!("WARP requested: {warp}");
+        let w = width as usize;
+        assert!(
+            got[1024..2048].iter().all(|&v| v == 1024),
+            "counter t0={} t1023={}",
+            got[1024],
+            got[2047]
+        );
+        for (i, wave) in got[..1024].chunks_exact(w).enumerate() {
+            assert!(
+                wave[0] < 1024 && wave[0] % width == 0,
+                "wave {i} base {}",
+                wave[0]
+            );
+            for (lane, &ticket) in wave.iter().enumerate() {
+                assert_eq!(ticket, wave[0] + lane as u32, "wave {i} lane {lane}");
+            }
+        }
+        let mut ordered = got[..1024].to_vec();
+        ordered.sort_unstable();
+        assert_eq!(ordered, (0..1024u32).collect::<Vec<_>>());
+        assert_eq!(got[2048], 0);
+        eprintln!("width={width} bytes={bytes} trial={trial} verified=2049");
+    }
+}
+
+fn check_paired_counts(
+    native: NativeProgram,
+    groups: u32,
+    view: View<'_>,
+    counts: &[u32],
+    expected: impl Fn(u32, u32) -> u32,
+) {
+    let program = ir::build(&native.code, native.wave64, native.vgprs).unwrap();
+    let shader =
+        lower::with_paired_lanes(|| lowered_counted(&native, &program, &HashSet::new(), 32, true))
+            .unwrap();
+    let limit = shader
+        .user_data
+        .iter()
+        .find(|u| u.root == RootType::Other(super::USER_DISPATCH_THREADS_X))
+        .unwrap();
+    assert_eq!((limit.slot, limit.dword), (0, 1024));
+    let _one = super::valu_tests::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let host = Host::new(false).unwrap();
+    validator::Validator::load(validator::Validator::default_path().as_deref())
+        .unwrap()
+        .validate(&mut shader.dxil.clone())
+        .unwrap();
+    let (root, pipeline) = host.compute_pipeline(&shader).unwrap();
+    for &count in counts {
+        let mut constants = vec![0; shader.user_data_dwords() as usize];
+        constants[limit.index as usize] = count;
+        let output = host
+            .dispatch(
+                &root,
+                &pipeline,
+                &Dispatch {
+                    roots: vec![(0, Root::Constants(constants))],
+                    views: std::slice::from_ref(&view),
+                    samplers: &[],
+                    groups: [groups, 1, 1],
+                },
+            )
+            .unwrap();
+        let active = if count == 0 { groups * 1024 } else { count };
+        let channels = match view {
+            View::RawUav(_) => 1,
+            View::TextureUav(_, _) => 4,
+            _ => unreachable!("expected a raw buffer or a float texture"),
+        };
+        assert_eq!(output[0].len(), 1025 * channels);
+        for (lane, values) in output[0].chunks_exact(channels).enumerate() {
+            let want = if lane == 1024 {
+                0
+            } else {
+                expected(lane as u32, active)
+            };
+            for &value in values {
+                assert_eq!(value, want, "count {count}, lane {lane}");
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires dxil.dll and a Wave32 hardware adapter"]
+fn paired_partial_groups_only_active_lanes_increment_uav() {
+    let native = native_of(
+        &[
+            0x3402_0082, // v_lshlrev_b32: byte offset of this lane
+            0x7e04_0281, // v_mov_b32: add one
+            0xe0c8_1000,
+            0x8002_0201, // buffer_atomic_add
+        ],
+        true,
+        1024,
+    );
+    check_paired_counts(
+        native,
+        2,
+        View::RawUav(1025),
+        &[
+            0, 1, 31, 32, 33, 63, 64, 65, 1023, 1024, 1025, 1057, 2047, 2048,
+        ],
+        |lane, active| u32::from(lane < active) + u32::from(lane + 1024 < active),
+    );
+}
+
+#[test]
+#[ignore = "requires dxil.dll and a Wave32 hardware adapter"]
+fn paired_partial_groups_only_active_lanes_increment_lds() {
+    // Clear the counters, add one per active lane at address zero, then
+    // copy the shared count to each active lane's output.
+    let mut native = native_of(
+        &[
+            0x3408_0082,
+            0x7e02_0281,
+            0x7e04_0280,
+            0x7e0a_0280,
+            (0x36 << 26) | (0x0d << 18),
+            (5 << 8) | 4,
+            0xbf8a0000,
+            (0x36 << 26) | (0x20 << 18),
+            (3 << 24) | (1 << 8) | 2,
+            0xbf8a0000,
+            (0x36 << 26) | (0x36 << 18),
+            (5 << 24) | 2,
+            0xe0701000,
+            0x80020504,
+        ],
+        true,
+        1024,
+    );
+    let StageIo::Cs(ref mut cs) = native.io else {
+        unreachable!()
+    };
+    cs.rsrc2 |= 64 << 15;
+    check_paired_counts(
+        native,
+        1,
+        View::RawUav(1025),
+        &[0, 1, 31, 32, 33, 63, 64, 65, 511, 512, 513, 1023, 1024],
+        |lane, active| if lane < active { active } else { 0 },
+    );
+}
+
+#[test]
+#[ignore = "requires dxil.dll and a Wave32 hardware adapter"]
+fn paired_partial_groups_only_active_lanes_store_texels() {
+    let mut native = native_of(
+        &[
+            0xf40c_0202,
+            0xfa00_0000, // load the eight-dword texture descriptor into s[8:15]
+            0x7e02_0280, // y = 0; x is the local thread id in v0
+            0x7e06_02f2,
+            0x7e08_02f2,
+            0x7e0a_02f2,
+            0x7e0c_02f2, // RGBA = (1, 1, 1, 1)
+            0xf020_1f08,
+            0x0002_0300, // image_store, all four channels
+        ],
+        true,
+        1024,
+    );
+    native.used[0].dwords = 8;
+    check_paired_counts(
+        native,
+        1,
+        View::TextureUav(1025, 1),
+        &[0, 1, 31, 32, 33, 63, 64, 65, 511, 512, 513, 1023, 1024],
+        |lane, active| if lane < active { 1f32.to_bits() } else { 0 },
+    );
 }

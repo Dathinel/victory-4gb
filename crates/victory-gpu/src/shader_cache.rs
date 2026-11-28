@@ -106,9 +106,27 @@ fn build() -> [u8; 32] {
     *hash.finalize().as_bytes()
 }
 
+fn pair_selected(container: &[u8]) -> bool {
+    victory_shader::emit::paired_container_hash()
+        .is_some_and(|key| blake3::hash(container).as_bytes()[..8] == key)
+}
+
+fn pair_build(base:[u8;32], selected:bool) -> [u8;32] {
+    if !selected {return base;}
+    let mut hash=blake3::Hasher::new();
+    hash.update(&base); hash.update(b"paired-wave64-v1");
+    *hash.finalize().as_bytes()
+}
+
 /// What tells one set of translations from another ([`build`]).
 pub(crate) fn translation() -> [u8; 32] {
-    build()
+    let base=build();
+    if let Some(key) = victory_shader::emit::paired_container_hash() {
+        let mut hash=blake3::Hasher::new();
+        hash.update(&base); hash.update(b"paired-history-v1"); hash.update(&key);
+        return *hash.finalize().as_bytes();
+    }
+    base
 }
 
 /// Puts the translation of `container` into the cache before any title asks
@@ -126,9 +144,11 @@ pub fn precompile(container: &[u8]) -> Result<bool, String> {
 /// The translation of a console shader container, from the cache when
 /// there is one.
 pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
-    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
+    crate::descriptor::host::probe_view_limit();
+    let selected=pair_selected(container);
+    let translate = |c: &[u8]| victory_shader::emit::translate_selected(c,selected).map_err(|e| e.to_string());
     match CACHE.get() {
-        Some(cache) => cached(cache, &build(), container, translate),
+        Some(cache) => cached(cache, &pair_build(build(),selected), container, translate),
         None => translate(container),
     }
 }

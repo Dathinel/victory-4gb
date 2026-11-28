@@ -433,9 +433,28 @@ pub(crate) fn run(r: Replay) -> Result<()> {
     Ok(())
 }
 
+// Captures historically replayed as Wave64 RDNA. An explicit wave width
+// selects a host profile; RDNA can then be requested separately.
+fn replay_host(wave: Option<&std::ffi::OsStr>, rdna: Option<&std::ffi::OsStr>) -> Result<(u32, bool)> {
+    let width = wave.map(|v| v.to_str().and_then(|v| v.trim().parse().ok())
+        .context("VICTORY_HOST_MAX_WAVE must be an unsigned integer")).transpose()?;
+    let rdna = match rdna {
+        None => width.is_none(),
+        Some(v) => match v.to_str().map(str::trim) {
+            Some("0") => false,
+            Some("1") => true,
+            _ => anyhow::bail!("VICTORY_HOST_RDNA must be 0 or 1"),
+        },
+    };
+    Ok((width.unwrap_or(64), rdna))
+}
+
 /// Translates the capture's shaders into `into`.
 fn retranslate(folder: &std::path::Path, into: &std::path::Path, view_limit: u32, raw_views: u32) -> Result<()> {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    let wave = std::env::var_os("VICTORY_HOST_MAX_WAVE");
+    let rdna = std::env::var_os("VICTORY_HOST_RDNA");
+    let (wave, rdna) = replay_host(wave.as_deref(), rdna.as_deref())?;
     let wanted = play::title_shaders(folder)?;
     let kept = play::find(folder)?.with_file_name("containers");
     std::fs::create_dir_all(&kept)?;
@@ -465,8 +484,8 @@ fn retranslate(folder: &std::path::Path, into: &std::path::Path, view_limit: u32
         }
     }
     println!("{} containers not found", missing.len());
-    victory_shader::emit::set_host_max_wave(64);
-    victory_shader::emit::set_host_rdna(true);
+    victory_shader::emit::set_host_max_wave(wave);
+    victory_shader::emit::set_host_rdna(rdna);
     victory_shader::emit::set_view_heap_limit(view_limit);
     victory_shader::emit::set_raw_views(raw_views);
     let all: Vec<_> = wanted.iter().collect();
@@ -477,7 +496,9 @@ fn retranslate(folder: &std::path::Path, into: &std::path::Path, view_limit: u32
             s.spawn(|| {
                 while let Some((stage, hash)) = all.get(next.fetch_add(1, Ordering::Relaxed)) {
                     let Ok(bytes) = std::fs::read(kept.join(format!("{hash}.cdxil"))) else { continue };
-                    match victory_shader::emit::translate(&bytes) {
+                    let selected = victory_shader::emit::paired_container_hash()
+                        .is_some_and(|key| blake3::hash(&bytes).as_bytes()[..8] == key);
+                    match victory_shader::emit::translate_selected(&bytes, selected) {
                         Ok(t) => {
                             if std::fs::write(into.join(format!("{hash}.dxil")), &t.dxil).is_ok() {
                                 done.fetch_add(1, Ordering::Relaxed);
@@ -495,6 +516,19 @@ fn retranslate(folder: &std::path::Path, into: &std::path::Path, view_limit: u32
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retranslation_host_settings_preserve_capture_defaults_and_accept_wave32() {
+        use std::ffi::OsStr;
+        use super::replay_host;
+
+        assert_eq!(replay_host(None, None).unwrap(), (64, true));
+        assert_eq!(replay_host(Some(OsStr::new("32 ")), None).unwrap(), (32, false));
+        assert_eq!(replay_host(Some(OsStr::new("32")), Some(OsStr::new(" 1"))).unwrap(), (32, true));
+        assert_eq!(replay_host(None, Some(OsStr::new("0"))).unwrap(), (64, false));
+        assert!(replay_host(Some(OsStr::new("invalid")), None).is_err());
+        assert!(replay_host(None, Some(OsStr::new("invalid"))).is_err());
+    }
+
     #[test]
     fn ranges() {
         assert_eq!(super::range("3..7"), Some((3, 7)));

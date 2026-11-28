@@ -433,7 +433,6 @@ pub(crate) fn run(r: Replay) -> Result<()> {
     Ok(())
 }
 
-/// Translates the capture's shaders into `into`.
 // Captures historically replayed as Wave64 RDNA. An explicit wave width
 // selects a host profile; RDNA can then be requested separately.
 fn replay_host(wave: Option<&std::ffi::OsStr>, rdna: Option<&std::ffi::OsStr>) -> Result<(u32, bool)> {

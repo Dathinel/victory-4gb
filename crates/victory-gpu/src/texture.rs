@@ -148,7 +148,7 @@ fn hot_textures() -> bool {
 
 /// `VICTORY_ZERO_RELOOK_FRAMES=<n>`: frames until a partly mapped texture
 /// that read nothing but zeros is read again (30 when unset, as any other
-/// partly mapped texture; 2 is what 星记's c341046 had, which its author
+/// partly mapped texture; 2 is what æ˜Ÿè®°'s c341046 had, which its author
 /// reverted minutes later without saying why, hence the switch).
 fn zero_relook_frames() -> u64 {
     static SET: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -363,6 +363,11 @@ pub(crate) fn alias(list: &HostList, placed: This, source: This) -> bool {
         }
         list.list
             .ResourceBarrier(&[crate::host::transition(&through.buffer, read, common)]);
+    }
+    // Close the copy interval before any unlabelled commands that follow it.
+    #[cfg(feature = "diagnostics")]
+    if crate::host::batch_timing() {
+        list.note_op(|| "after alias copy".to_owned());
     }
     list.keep(&through.buffer);
     // A draw that also writes the source (a view of it handled before

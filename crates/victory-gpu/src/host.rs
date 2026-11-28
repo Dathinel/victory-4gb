@@ -982,8 +982,14 @@ fn create() -> windows::core::Result<Host> {
             messages,
             next_rtv: AtomicU32::new(0),
             presenter: Mutex::new(None),
-            software_adapter: adapter.as_ref().and_then(|a| a.GetDesc1().ok())
-                .is_some_and(|desc| desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0),
+            // The Microsoft Basic Render Driver on hosted Windows can report Flags == 0.
+            software_adapter: adapter
+                .as_ref()
+                .and_then(|a| a.GetDesc1().ok())
+                .is_some_and(|d| {
+                    d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0
+                        || (d.VendorId, d.DeviceId) == (0x1414, 0x008c)
+                }),
             adapter,
             fallback_view: OnceLock::new(),
             fallback_sampler: OnceLock::new(),

@@ -1130,3 +1130,115 @@ fn meshlet_1024_lds() {
         eprintln!("width={width} bytes={bytes} trial={trial} verified=2049");
     }
 }
+
+fn check_paired_counts(
+    native: NativeProgram,
+    groups: u32,
+    counts: &[u32],
+    expected: impl Fn(u32, u32) -> u32,
+) {
+    let program = ir::build(&native.code, native.wave64, native.vgprs).unwrap();
+    let shader =
+        lower::with_paired_lanes(|| lowered_counted(&native, &program, &HashSet::new(), 32, true))
+            .unwrap();
+    let limit = shader
+        .user_data
+        .iter()
+        .find(|u| u.root == RootType::Other(super::USER_DISPATCH_THREADS_X))
+        .unwrap();
+    assert_eq!((limit.slot, limit.dword), (0, 1024));
+    let _one = super::valu_tests::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let host = Host::new(false).unwrap();
+    validator::Validator::load(validator::Validator::default_path().as_deref())
+        .unwrap()
+        .validate(&mut shader.dxil.clone())
+        .unwrap();
+    let (root, pipeline) = host.compute_pipeline(&shader).unwrap();
+    for &count in counts {
+        let mut constants = vec![0; shader.user_data_dwords() as usize];
+        constants[limit.index as usize] = count;
+        let output = host
+            .dispatch(
+                &root,
+                &pipeline,
+                &Dispatch {
+                    roots: vec![(0, Root::Constants(constants))],
+                    views: &[View::RawUav(1025)],
+                    samplers: &[],
+                    groups: [groups, 1, 1],
+                },
+            )
+            .unwrap();
+        let active = if count == 0 { groups * 1024 } else { count };
+        for (lane, &word) in output[0][..1024].iter().enumerate() {
+            assert_eq!(
+                word,
+                expected(lane as u32, active),
+                "count {count}, lane {lane}"
+            );
+        }
+        assert_eq!(output[0][1024], 0, "guard word for count {count}");
+    }
+}
+
+#[test]
+#[ignore = "requires dxil.dll and a Wave32 hardware adapter"]
+fn paired_partial_groups_only_active_lanes_increment_uav() {
+    let native = native_of(
+        &[
+            0x3402_0082, // v_lshlrev_b32: byte offset of this lane
+            0x7e04_0281, // v_mov_b32: add one
+            0xe0c8_1000,
+            0x8002_0201, // buffer_atomic_add
+        ],
+        true,
+        1024,
+    );
+    check_paired_counts(
+        native,
+        2,
+        &[
+            0, 1, 31, 32, 33, 63, 64, 65, 1023, 1024, 1025, 1057, 2047, 2048,
+        ],
+        |lane, active| u32::from(lane < active) + u32::from(lane + 1024 < active),
+    );
+}
+
+#[test]
+#[ignore = "requires dxil.dll and a Wave32 hardware adapter"]
+fn paired_partial_groups_only_active_lanes_increment_lds() {
+    // Clear the counters, add one per active lane at address zero, then
+    // copy the shared count to each active lane's output.
+    let mut native = native_of(
+        &[
+            0x3408_0082,
+            0x7e02_0281,
+            0x7e04_0280,
+            0x7e0a_0280,
+            (0x36 << 26) | (0x0d << 18),
+            (5 << 8) | 4,
+            0xbf8a0000,
+            (0x36 << 26) | (0x20 << 18),
+            (3 << 24) | (1 << 8) | 2,
+            0xbf8a0000,
+            (0x36 << 26) | (0x36 << 18),
+            (5 << 24) | 2,
+            0xe0701000,
+            0x80020504,
+        ],
+        true,
+        1024,
+    );
+    let StageIo::Cs(ref mut cs) = native.io else {
+        unreachable!()
+    };
+    cs.rsrc2 |= 64 << 15;
+    check_paired_counts(
+        native,
+        1,
+        &[0, 1, 31, 32, 33, 63, 64, 65, 511, 512, 513, 1023, 1024],
+        |lane, active| if lane < active { active } else { 0 },
+    );
+}

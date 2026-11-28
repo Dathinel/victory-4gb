@@ -467,7 +467,7 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
 fn translate(
     source: &Source,
     path: &Path,
-    seen: &Mutex<HashSet<blake3::Hash>>,
+    seen: &Mutex<HashSet<(blake3::Hash, bool)>>,
     t: &mut Tally,
     checks: &mut Checks,
 ) {
@@ -477,7 +477,9 @@ fn translate(
     };
     // The hash a run's log names the shader by (`hash=` in "first bind",
     // "shader does not translate", "host pipeline refused").
-    let hash = blake3::hash(&bytes).to_hex()[..16].to_owned();
+    let digest = blake3::hash(&bytes);
+    let selected = emit::paired_container_hash().is_some_and(|key| digest.as_bytes()[..8] == key);
+    let hash = digest.to_hex()[..16].to_owned();
     // Diagnostics: `VICTORY_TRANSLATE_ONLY=<hash prefix>,...` translates
     // those containers alone.
     static ONLY: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
@@ -501,7 +503,7 @@ fn translate(
         return t.fail("no DXIL part (SM5 or older)".into(), example);
     };
     // `~`: the hash of the code alone; containers that differ only around
-    // it are translated once, the others listed as duplicates of it.
+    // it and use the same lowering are translated once, the others listed as duplicates of it.
     let code = blake3::hash(dxil);
     let code8 = code.to_hex()[..8].to_owned();
     let example = || format!("{} ~{code8}", example());
@@ -523,7 +525,7 @@ fn translate(
             let _ = std::fs::write(std::path::Path::new(dir).join(format!("{name}.{hash}.cdxil")), &bytes[..]);
         }
     }
-    if !lock(seen).insert(code) {
+    if !lock(seen).insert((code, selected)) {
         t.duplicates += 1;
         if t.list {
             t.lines.push(format!("{}  duplicate", example()));
@@ -538,7 +540,7 @@ fn translate(
     // has them (`.cdxil`), to work on a translator gap offline
     let dump = std::env::var_os("VICTORY_FAIL_DUMP");
     let before: Option<BTreeMap<String, usize>> = dump.as_ref().map(|_| t.failed.iter().map(|(k, v)| (k.clone(), v.0)).collect());
-    translate_programs(&container, programs, &example, t, checks);
+    translate_programs(&container, selected, programs, &example, t, checks);
     if let (Some(dir), Some(before)) = (dump, before) {
         for (reason, (n, _)) in &t.failed {
             let was = before.get(reason).copied().unwrap_or(0);
@@ -551,7 +553,7 @@ fn translate(
     }
 }
 
-fn translate_programs(container: &Container, programs: Vec<NativeProgram>, example: &dyn Fn() -> String, t: &mut Tally, checks: &mut Checks) {
+fn translate_programs(container: &Container, selected: bool, programs: Vec<NativeProgram>, example: &dyn Fn() -> String, t: &mut Tally, checks: &mut Checks) {
     for p in programs {
         t.programs += 1;
         match victory_shader::spill::build(&p) {
@@ -615,7 +617,7 @@ fn translate_programs(container: &Container, programs: Vec<NativeProgram>, examp
                 if let (Some(r), Some(i), Some(s)) = (res, raised, structured) {
                     let label = || format!("{} {:?}", example(), p.stage);
                     *counter(t, p.stage, 0) += 1;
-                    match emit::emit(container, &p, &program, &s, &i, &r) {
+                    match emit::emit_selected(container, &p, &program, &s, &i, &r, selected) {
                         Ok(shader) => {
                             census_line(&label(), &p, &program, &shader);
                             *counter(t, p.stage, 1) += 1;

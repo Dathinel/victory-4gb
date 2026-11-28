@@ -456,6 +456,21 @@ pub fn emit(
     emit_selected(c,native,p,st,io,res,false)
 }
 
+/// The full-container BLAKE3 prefix selected for paired translation on a Wave32 host.
+pub fn paired_container_hash() -> Option<[u8; 8]> {
+    if host_settings()[0] != 32 {
+        return None;
+    }
+    static HASH: std::sync::OnceLock<Option<[u8; 8]>> = std::sync::OnceLock::new();
+    *HASH.get_or_init(|| {
+        let value = std::env::var("VICTORY_WAVE_PAIRS_ONLY").ok()?;
+        if value.len() != 16 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(u64::from_str_radix(&value, 16).ok()?.to_be_bytes())
+    })
+}
+
 pub fn emit_selected(
     c: &Container,
     native: &NativeProgram,

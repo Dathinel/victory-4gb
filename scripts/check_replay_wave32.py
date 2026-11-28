@@ -24,6 +24,10 @@ def container():
         0x4a060c07, 0xbf8a0000, 0xd8d80000, 0x05000002, 0xe0701000,
         0x80020304, 0x4a0c08ff, 4096, 0xe0701000, 0x80020506, 0xbf810000,
     )
+    return compute_container(words, threads=1024, lds_blocks=64)
+
+
+def compute_container(words, threads, lds_blocks):
     code = pack("I" * len(words), *words)
     record = 0x68
     stage = record + 0x54
@@ -37,7 +41,7 @@ def container():
     struct.pack_into("<QQ", data, record, start, len(code))
     struct.pack_into("<QQII", data, record + 40, tables, tables + 40, 2, 1)
     struct.pack_into("<I", data, record + 80, 16)
-    struct.pack_into("<IIII", data, stage + 36, 10 | (64 << 15), 1024, 1, 1)
+    struct.pack_into("<IIII", data, stage + 36, 10 | (lds_blocks << 15), threads, 1, 1)
     data[start:] = code
     data += pack("IIIIBBxx", 0, 0, 4, 0, 0, 0)
     data += pack("IIIIBBxx", 3, 0, 1, 0, 4, 1)

@@ -467,7 +467,7 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
 fn translate(
     source: &Source,
     path: &Path,
-    seen: &Mutex<HashSet<(blake3::Hash, bool)>>,
+    seen: &Mutex<HashSet<blake3::Hash>>,
     t: &mut Tally,
     checks: &mut Checks,
 ) {
@@ -502,8 +502,8 @@ fn translate(
     let Some(dxil) = container.part(FourCC::DXIL).or(container.part(FourCC::ACCC)).map(|p| p.data) else {
         return t.fail("no DXIL part (SM5 or older)".into(), example);
     };
-    // `~`: the hash of the code alone; containers that differ only around
-    // it and use the same lowering are translated once, the others listed as duplicates of it.
+    // Report the code hash, but deduplicate whole containers: headers and
+    // signature parts can change how identical instructions are translated.
     let code = blake3::hash(dxil);
     let code8 = code.to_hex()[..8].to_owned();
     let example = || format!("{} ~{code8}", example());
@@ -525,7 +525,7 @@ fn translate(
             let _ = std::fs::write(std::path::Path::new(dir).join(format!("{name}.{hash}.cdxil")), &bytes[..]);
         }
     }
-    if !lock(seen).insert((code, selected)) {
+    if !lock(seen).insert(digest) {
         t.duplicates += 1;
         if t.list {
             t.lines.push(format!("{}  duplicate", example()));

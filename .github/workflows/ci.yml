@@ -31,3 +31,5 @@ jobs:
       # Includes xtask's repository_passes_policy, the asset-policy check.
       - name: Tests
         run: cargo test --workspace --locked
+      - name: Diagnostics CLI regressions
+        run: cargo test --locked -p victory --features diagnostics --test wave32_cli

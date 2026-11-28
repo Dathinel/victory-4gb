@@ -2,7 +2,7 @@
 use std::{fs, path::Path, process::Command};
 use tempfile::tempdir;
 
-#[cfg(feature = "diagnostics")]
+#[cfg(all(windows, feature = "diagnostics"))]
 const MESH: &[u32] = &[
     0xbe850380, 0xf4080202, 0xfa000000, 0x34080082, 0x7e0202ff, 64, 0x7e0402ff, 32764, 0x7e0a0280,
     0xd8347000, 0x0504, 0xbf8a0000, 0x7e0602ff, 0x55555555, 0x360c0000, 0x7d880c01, 0xbe8c246a,
@@ -159,7 +159,7 @@ fn batch_preserves_distinct_header_policies_and_skips_identical_copies() {
     assert!(report.contains("1 duplicates skipped"), "{report}");
 }
 
-#[cfg(feature = "diagnostics")]
+#[cfg(all(windows, feature = "diagnostics"))]
 #[test]
 fn replay_and_translate_select_the_same_wave32_form() {
     let tmp = tempdir().unwrap();

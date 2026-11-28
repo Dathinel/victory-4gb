@@ -883,14 +883,17 @@ static VIEWS: std::sync::RwLock<Views> = std::sync::RwLock::new(Views {
 /// minutes and the frame rate fell by half. A descriptor names the view it
 /// was written with for a frame or a few, so the oldest of a million are
 /// long out of use; one naming a freed entry reads as stale (no view).
-/// `VICTORY_OWNERLESS_VIEWS=<n>` keeps `n` (0: all, as before).
+/// `VICTORY_OWNERLESS_VIEWS=<n>` keeps `n`; unset or 0 keeps all, as before:
+/// the oldest entry is dropped even when the title has just written the same
+/// view again (it keeps its place in the line), so a view in use can go stale
+/// under a small cap. Off here until writing it again moves it to the back.
 fn ownerless_cap() -> usize {
     static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CAP.get_or_init(|| {
         std::env::var("VICTORY_OWNERLESS_VIEWS")
             .ok()
             .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(1 << 20)
+            .unwrap_or(0)
     })
 }
 const VIEW_TAG: u32 = u32::from_le_bytes(*b"vVIE");
@@ -1027,6 +1030,10 @@ impl Views {
     /// [`entry`](Self::entry), keeping at most `cap` entries of views
     /// without a resource (0: all).
     fn entry_kept(&mut self, view: View, cap: usize) -> [u32; 2] {
+        if cap == 0 {
+            // No cap: nothing is noted, as before there was one.
+            return self.entry_made(view);
+        }
         let ownerless = view.resources() == [0, 0] && matches!(view, View::Constant(..) | View::Placed(..));
         let fresh = !self.index.contains_key(&view);
         let words = self.entry_made(view);
@@ -1827,6 +1834,9 @@ mod tests {
             views.entry_kept(placed(n), 0);
         }
         assert_eq!(views.index.len(), 1 + 4 + 20);
+        // And notes nothing: the line is as long as the cap of 4 left it.
+        assert_eq!(views.ownerless.len(), 4);
+        assert!(named(&views, views.index.get(&placed(40)).map(|&i| [i, views.list[i as usize].1]).unwrap(), &placed(40)));
     }
 
     /// The leak of run 65: a title that writes constant buffer views and

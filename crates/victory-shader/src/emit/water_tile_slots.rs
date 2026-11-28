@@ -73,7 +73,12 @@ pub(super) fn rewrite(native: &mut NativeProgram) -> bool {
     if !known(native) {
         return false;
     }
-    let before = native.code.clone();
+    rewrite_appends(&mut native.code);
+    true
+}
+
+fn rewrite_appends(code: &mut [u8]) {
+    let before = code.to_vec();
     let mut one: [u8; 4] = before[MOVE_ZERO..MOVE_ZERO + 4].try_into().expect("four bytes");
     // The source operand's nine bits: 0x80 is the constant 0, 0x81 the constant 1.
     one[0] |= 1;
@@ -83,14 +88,13 @@ pub(super) fn rewrite(native: &mut NativeProgram) -> bool {
         for piece in append.kept {
             new.extend_from_slice(&before[piece.clone()]);
         }
-        let body = &mut native.code[append.body];
+        let body = &mut code[append.body];
         debug_assert!(new.len() <= body.len() && body.len() % 4 == 0);
         body[..new.len()].copy_from_slice(&new);
         for word in body[new.len()..].chunks_exact_mut(4) {
             word.copy_from_slice(&nop);
         }
     }
-    true
 }
 
 #[cfg(test)]
@@ -131,18 +135,7 @@ mod tests {
         let mut code = before.clone();
         let one = 0x7e0a_0281u32.to_le_bytes();
         let nop = 0xbf80_0000u32.to_le_bytes();
-        // (the rewrite's body, without the identity test)
-        for append in [FRONT, BACK] {
-            let mut new = one.to_vec();
-            for piece in append.kept {
-                new.extend_from_slice(&before[piece.clone()]);
-            }
-            let body = &mut code[append.body];
-            body[..new.len()].copy_from_slice(&new);
-            for word in body[new.len()..].chunks_exact_mut(4) {
-                word.copy_from_slice(&nop);
-            }
-        }
+        rewrite_appends(&mut code);
         assert_eq!(code.len(), before.len());
         // Front: the move of 1, the add (8 bytes of mark 1), the wait (4 bytes of mark 2).
         assert_eq!(&code[0x6a8..0x6ac], &one);

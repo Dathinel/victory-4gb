@@ -54,6 +54,7 @@ $set = [ordered]@{
     VICTORY_AMBIENT_AIR       = '1.5'
     VICTORY_AMBIENT_SETTLE    = '250,3'
     VICTORY_AMBIENT_MARCH     = '3'
+    VICTORY_FILL_TITLE        = '1'
     VICTORY_RELAY_COPY        = '1'
     VICTORY_CARD_REHASH_RUNS  = '1'
     VICTORY_JOIN_COPIES       = '1'
@@ -70,7 +71,9 @@ if ($p.Render -eq '0.5') {
 if ($p.Budget -gt 0) { $set.VICTORY_TEXTURE_BUDGET_MB = "$($p.Budget)" }
 # rt_off_hashes.txt: the ray-tracing resolves (trustno1-coder's list). rt_work_off_hashes.txt: work done
 # only for ray tracing, which does not run here: the 41 bvh_skinning programs (about 22 ms of card
-# time a frame) and the probes' CS_Primary_GatherCopy (about 50 ms).
+# time a frame), the probes' CS_Primary_GatherCopy (about 50 ms) and three more passes of the light
+# probes (GatherVBuffer, ShadeCopy, RegisterAllocationRequests: about 19 ms), whose light the ambient
+# stand-in already replaces.
 $skip = 'rt_off_hashes.txt', 'rt_work_off_hashes.txt' | ForEach-Object { Join-Path $PSScriptRoot $_ } |
     Where-Object { Test-Path $_ } | ForEach-Object { (Get-Content $_ -Raw) -replace '\s', '' }
 if ($skip) { $set.VICTORY_SKIP_PIPELINES = $skip -join ',' }

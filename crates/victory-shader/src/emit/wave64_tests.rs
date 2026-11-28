@@ -1028,3 +1028,34 @@ fn swap_first_lane_broadcast_reaches_both_host_waves() {
         assert_eq!(word, 63, "guest thread {thread}: first lane of swapped ID plus lane 63");
     }
 }
+
+/// A wave64 tile-list producer on wave32. The list order is unspecified, but each
+/// lane must receive a unique slot from its counter, including lanes in the upper half.
+#[test]
+#[ignore = "requires wave32-capable D3D12 hardware"]
+fn tile_list_atomic_returns_every_slot_across_both_halves() {
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    for (shift, sizes) in [(6, [64, 0]), (5, [32, 32])] {
+        let native = native(&[
+            0x2c02_0080 | shift, // v1 = local thread ID >> shift (list index)
+            0x3402_0282,         // v1 <<= 2 (byte address of the counter)
+            0x7e04_0281,         // v2 = 1
+            0xe0c8_5000, 0x8002_0201, // buffer_atomic_add v2, v1, ... offen glc
+            0x3406_0082,         // v3 = local thread ID << 2
+            0xe070_1008, 0x8002_0203, // store returned slot after the two counters
+        ]);
+        let program = ir::build(&native.code, native.wave64, native.vgprs).expect("build IR");
+        let shader = lowered(&native, &program, &HashSet::new()).expect("lower for wave32");
+        let out = on_the_card_uav(&shader, 32, [0, 0], 67).expect("wave32 readback");
+        assert_eq!(&out[..2], &sizes);
+        let mut start = 2;
+        for size in sizes {
+            let end = start + size as usize;
+            let mut slots = out[start..end].to_vec();
+            slots.sort_unstable();
+            assert_eq!(slots, (0..size).collect::<Vec<_>>(), "list starting at {start}");
+            start = end;
+        }
+        assert_eq!(out[66], 0, "trailing guard");
+    }
+}

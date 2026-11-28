@@ -32,6 +32,18 @@
 //! `VICTORY_AMBIENT_SETTLE=<ms>[,<jump>]` has the slow mean follow by the
 //! clock, not by the frame (see `settle`).
 //!
+//! `VICTORY_AMBIENT_MIN=<level>`: the estimate is never under this much
+//! light (the constant's colour, shaded in creases as it is), whatever the
+//! picture shows. Unset or 0: the estimate alone. A room only lamps light
+//! sends no light into the estimate when the title's rays are off; the floor
+//! keeps what is there visible, without raising what the estimate already
+//! lights more.
+//!
+//! `VICTORY_AMBIENT_FILE=<file>`: the file's first line stands in for
+//! `VICTORY_AMBIENT` and may add `min:<level>`, read again every second so
+//! that settings are compared in one scene of one run. The upstream line's
+//! `once` word is passed over: this tree has no once handling to map it to.
+//!
 //! The air of a room is lit by the same probes: without rays they hold the
 //! sky's light indoors too, a brown veil at sunset. `VICTORY_AMBIENT_AIR`
 //! bounds what the air scatters by a multiple of the light around.
@@ -181,9 +193,72 @@ fn parse(set: &str) -> Set {
     }
 }
 
+/// What the first line of `VICTORY_AMBIENT_FILE` says: the stand-in's
+/// setting, then `min:<level>` for the floor under the estimate.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Live {
+    set: Set,
+    min: Option<f32>,
+}
+
+fn parse_live(line: &str) -> Live {
+    let mut words = line.split_whitespace();
+    let set = parse(words.next().unwrap_or(""));
+    let mut min = None;
+    for word in words {
+        if let Some(level) = word.strip_prefix("min:") {
+            min = parse_min(level);
+        }
+    }
+    Live { set, min }
+}
+
+fn parse_min(level: &str) -> Option<f32> {
+    level.trim().parse::<f32>().ok().filter(|v| v.is_finite() && *v >= 0.0)
+}
+
 fn set() -> Set {
+    if let Some(live) = live() {
+        return live.set;
+    }
     static SET: OnceLock<Set> = OnceLock::new();
     *SET.get_or_init(|| parse(&std::env::var("VICTORY_AMBIENT").unwrap_or_default()))
+}
+
+/// The settings file's first line, read again every second (`VICTORY_AMBIENT_FILE`).
+fn live() -> Option<Live> {
+    static FILE: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    let file = FILE.get_or_init(|| std::env::var_os("VICTORY_AMBIENT_FILE").map(Into::into)).as_ref()?;
+    type Read = Option<(std::time::Instant, Option<Live>)>;
+    static READ: Mutex<Read> = Mutex::new(None);
+    let mut read = READ.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    if let Some((at, value)) = *read
+        && now.duration_since(at) < std::time::Duration::from_secs(1)
+    {
+        return value;
+    }
+    let value = std::fs::read_to_string(file).ok().and_then(|text| text.lines().next().map(parse_live));
+    *read = Some((now, value));
+    value
+}
+
+/// The floor under the estimate (`VICTORY_AMBIENT_MIN=<level>`; unset or 0:
+/// none). Where the estimate is above it, nothing changes.
+fn minimum() -> f32 {
+    if let Some(Live { min: Some(min), .. }) = live() {
+        return min;
+    }
+    static MINIMUM: OnceLock<f32> = OnceLock::new();
+    *MINIMUM.get_or_init(|| std::env::var("VICTORY_AMBIENT_MIN").ok().and_then(|v| parse_min(&v)).unwrap_or(0.0))
+}
+
+/// Whether the floor can be asked for now or later. A settings file can add
+/// it after the passes are made; with neither it nor the switch, only the
+/// plain raise shader is built, exactly as before.
+fn floor_may_run() -> bool {
+    static MAY: OnceLock<bool> = OnceLock::new();
+    *MAY.get_or_init(|| std::env::var_os("VICTORY_AMBIENT_FILE").is_some() || minimum() > 0.0)
 }
 
 /// Whether the stand-in is on: set, and the title's rays find nothing.
@@ -532,6 +607,28 @@ void raise(uint3 at : SV_DispatchThreadID) {
 #endif
 "#;
 
+/// The shader text of one pass. `floor` inserts the minimum-light line only
+/// into the raising pass; without it the text is byte for byte what it was
+/// before the floor existed.
+fn source(part: &str, floor: bool) -> String {
+    let plain = format!("#define {part}\n{SOURCE}");
+    if !floor || part != "RAISE" {
+        return plain;
+    }
+    const FOUND: &str = "    found = lerp(found, cells[CELLS].rgb, 0.2) * level * open;\n";
+    const RAISED: &str = concat!(
+        "    found = lerp(found, cells[CELLS].rgb, 0.2) * level * open;\n",
+        "    // `VICTORY_AMBIENT_MIN`: never under that, whatever the picture shows;\n",
+        "    // half of it on what faces down, all of it on what faces up, so a face\n",
+        "    // or a fold keeps its shape. The resolve has no use for `jump`: that\n",
+        "    // constant word carries the floor here.\n",
+        "    found = max(found, float3(1.0, 0.98, 0.94) * jump * open * (0.75 + 0.25 * n.y));\n",
+    );
+    let floored = plain.replacen(FOUND, RAISED, 1);
+    assert!(floored.len() > plain.len(), "the floor's place in the ambient shader");
+    floored
+}
+
 /// Bytes of the cells' buffer and of the points'.
 const CELLS: u64 = 64 * 36;
 const CELL_BYTES: u64 = (2 * CELLS + 1) * 16;
@@ -552,6 +649,9 @@ struct Pass {
     place: ID3D12PipelineState,
     gather: ID3D12PipelineState,
     raise: ID3D12PipelineState,
+    /// `raise` with the floor line, built only when the switch or a settings
+    /// file can ask for it.
+    raise_floor: Option<ID3D12PipelineState>,
     air: ID3D12PipelineState,
     /// Skin's fill (`VICTORY_SKIN_FILL`): its two programs and its views,
     /// made only with the switch on, and apart: a failure here leaves the
@@ -572,8 +672,8 @@ unsafe impl Sync for Pass {}
 
 fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -> windows::core::Result<Pass> {
     let mut root: Option<ID3D12RootSignature> = None;
-    let mut pipeline = |part: &str, entry| -> windows::core::Result<ID3D12PipelineState> {
-        let code = crate::host::compile(&format!("#define {part}\n{SOURCE}"), entry, s!("cs_5_1"))?;
+    let mut pipeline = |part: &str, entry, floor| -> windows::core::Result<ID3D12PipelineState> {
+        let code = crate::host::compile(&source(part, floor), entry, s!("cs_5_1"))?;
         // SAFETY: the root signature is inside the shader; plain creations.
         unsafe {
             if root.is_none() {
@@ -599,12 +699,13 @@ fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -
             device.CreateComputePipelineState(&desc)
         }
     };
-    let keep = pipeline("KEEP", s!("keep"))?;
-    let mean = pipeline("KEEP", s!("mean"))?;
-    let place = pipeline("PLACE", s!("place"))?;
-    let gather = pipeline("GATHER", s!("gather"))?;
-    let raise = pipeline("RAISE", s!("raise"))?;
-    let air = pipeline("AIR", s!("clear_air"))?;
+    let keep = pipeline("KEEP", s!("keep"), false)?;
+    let mean = pipeline("KEEP", s!("mean"), false)?;
+    let place = pipeline("PLACE", s!("place"), false)?;
+    let gather = pipeline("GATHER", s!("gather"), false)?;
+    let raise = pipeline("RAISE", s!("raise"), false)?;
+    let raise_floor = if floor_may_run() { Some(pipeline("RAISE", s!("raise"), true)?) } else { None };
+    let air = pipeline("AIR", s!("clear_air"), false)?;
     let kind = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     let views = || -> windows::core::Result<ID3D12DescriptorHeap> {
         // SAFETY: plain heap creation.
@@ -618,13 +719,13 @@ fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -
         }
     };
     let march = (march() > 0.0)
-        .then(|| pipeline("MARCH", s!("clear_march")))
+        .then(|| pipeline("MARCH", s!("clear_march"), false))
         .and_then(|made| made.inspect_err(|e| tracing::warn!(error = %e, "no clamp of the marched in-scatter")).ok());
     let fill = skin_fill()
         .then(|| -> windows::core::Result<_> {
-            let fill = pipeline("FILL", s!("fill"))?;
+            let fill = pipeline("FILL", s!("fill"), false)?;
             let volume = pipeline("FILL
-#define VOLUME", s!("fill"))?;
+#define VOLUME", s!("fill"), false)?;
             Ok((fill, volume, views()?))
         })
         .and_then(|made| made.inspect_err(|e| tracing::warn!(error = %e, "skin: no fill of its probe images")).ok());
@@ -636,6 +737,7 @@ fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -
         place,
         gather,
         raise,
+        raise_floor,
         air,
         fill,
         march,
@@ -708,6 +810,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     }
     list.keep(&pass.cells);
     list.keep(&pass.points);
+    let minimum = if role == Role::Resolve { minimum() } else { 0.0 };
     let [strength, radius] = shade();
     let floats = [level, constant, strength, radius, 0.1, 0.45];
     let mut words = [0u32; 13];
@@ -720,6 +823,10 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     if role == Role::Radiance {
         words[8] = follow(frame_ms()).to_bits();
         words[12] = settle().map_or(0.0, |[_, jump]| jump).to_bits();
+    }
+    // (`jump` is only the mean's; in the resolve that word carries the floor.)
+    if role == Role::Resolve {
+        words[12] = minimum.to_bits();
     }
     words[9] = most().to_bits();
     words[10] = air().to_bits();
@@ -756,7 +863,8 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
                     run(&pass.place, 8, 9, 1);
                     run(&pass.gather, 20, 45, 1);
                 }
-                run(&pass.raise, views.size[0].div_ceil(8), views.size[1].div_ceil(8), 1);
+                let raise = if minimum > 0.0 { pass.raise_floor.as_ref().unwrap_or(&pass.raise) } else { &pass.raise };
+                run(raise, views.size[0].div_ceil(8), views.size[1].div_ceil(8), 1);
             }
         }
     }
@@ -968,6 +1076,35 @@ mod tests {
         assert_eq!(multiple(" 1.5 "), 1.5);
     }
 
+    /// Unset, the raising shader is byte for byte as before; set, only its
+    /// copy with the floor has the floor line.
+    #[test]
+    fn the_floor_is_only_in_its_shader() {
+        let plain = source("RAISE", false);
+        assert_eq!(plain, format!("#define RAISE\n{SOURCE}"));
+        assert!(!plain.contains("0.75 + 0.25 * n.y"));
+        assert_eq!(source("KEEP", true), format!("#define KEEP\n{SOURCE}"));
+        let floored = source("RAISE", true);
+        assert!(floored.contains("found = max(found, float3(1.0, 0.98, 0.94) * jump"));
+        assert!(floored.len() > plain.len());
+    }
+
+    #[test]
+    fn minimum_settings() {
+        assert_eq!(parse_min(""), None);
+        assert_eq!(parse_min("0"), Some(0.0));
+        assert_eq!(parse_min(" 0.2 "), Some(0.2));
+        assert_eq!(parse_min("-1"), None);
+        assert_eq!(parse_min("nan"), None);
+        assert_eq!(parse_min("inf"), None);
+        // The line of `VICTORY_AMBIENT_FILE`; `once` is passed over here.
+        assert_eq!(parse_live("0.8"), Live { set: Set::Estimate(0.8), min: None });
+        assert_eq!(parse_live("0.8 once min:0.2"), Live { set: Set::Estimate(0.8), min: Some(0.2) });
+        assert_eq!(parse_live(" 2 min:0.25 "), Live { set: Set::Estimate(2.0), min: Some(0.25) });
+        assert_eq!(parse_live("constant:0.5 min:x"), Live { set: Set::Constant(0.5), min: None });
+        assert_eq!(parse_live(""), Live { set: Set::Off, min: None });
+    }
+
     #[test]
     fn skin_settings() {
         assert_eq!(slots(""), [176]);
@@ -997,5 +1134,6 @@ mod tests {
         make(&host.device, |bytes| host.uav_buffer(bytes)).expect("the passes");
         // (Made only with its switch on, so compiled here by itself.)
         crate::host::compile(&format!("#define MARCH\n{SOURCE}"), s!("clear_march"), s!("cs_5_1")).expect("the march clamp");
+        crate::host::compile(&source("RAISE", true), s!("raise"), s!("cs_5_1")).expect("the raise with the floor");
     }
 }

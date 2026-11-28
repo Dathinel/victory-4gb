@@ -106,9 +106,36 @@ fn build() -> [u8; 32] {
     *hash.finalize().as_bytes()
 }
 
+fn pair_hash() -> Option<[u8;8]> {
+    static HASH: OnceLock<Option<[u8;8]>> = OnceLock::new();
+    *HASH.get_or_init(|| {
+        let value = std::env::var("VICTORY_WAVE_PAIRS_ONLY").ok()?;
+        if value.len()!=16 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {return None;}
+        Some(u64::from_str_radix(&value,16).ok()?.to_be_bytes())
+    })
+}
+
+fn pair_selected(container: &[u8]) -> bool {
+    victory_shader::emit::host_settings()[0]==32 &&
+        pair_hash().is_some_and(|key| blake3::hash(container).as_bytes()[..8]==key)
+}
+
+fn pair_build(base:[u8;32], selected:bool) -> [u8;32] {
+    if !selected {return base;}
+    let mut hash=blake3::Hasher::new();
+    hash.update(&base); hash.update(b"paired-wave64-v1");
+    *hash.finalize().as_bytes()
+}
+
 /// What tells one set of translations from another ([`build`]).
 pub(crate) fn translation() -> [u8; 32] {
-    build()
+    let base=build();
+    if victory_shader::emit::host_settings()[0]==32 && let Some(key)=pair_hash() {
+        let mut hash=blake3::Hasher::new();
+        hash.update(&base); hash.update(b"paired-history-v1"); hash.update(&key);
+        return *hash.finalize().as_bytes();
+    }
+    base
 }
 
 /// Puts the translation of `container` into the cache before any title asks
@@ -126,9 +153,11 @@ pub fn precompile(container: &[u8]) -> Result<bool, String> {
 /// The translation of a console shader container, from the cache when
 /// there is one.
 pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
-    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
+    crate::descriptor::host::probe_view_limit();
+    let selected=pair_selected(container);
+    let translate = |c: &[u8]| victory_shader::emit::translate_selected(c,selected).map_err(|e| e.to_string());
     match CACHE.get() {
-        Some(cache) => cached(cache, &build(), container, translate),
+        Some(cache) => cached(cache, &pair_build(build(),selected), container, translate),
         None => translate(container),
     }
 }

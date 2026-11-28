@@ -1028,3 +1028,93 @@ fn swap_first_lane_broadcast_reaches_both_host_waves() {
         assert_eq!(word, 63, "guest thread {thread}: first lane of swapped ID plus lane 63");
     }
 }
+
+#[test]
+#[ignore = "requires dxil.dll and a Wave32 hardware adapter"]
+fn meshlet_1024_lds() {
+    super::set_host_max_wave(32);
+    let wave64 = true;
+    let bytes = std::env::var("MESH_BYTES")
+        .unwrap_or_else(|_| "32768".into())
+        .parse::<u32>()
+        .unwrap();
+    let offset = bytes - 4096;
+    let width = if wave64 { 64u32 } else { 32 };
+    let body = [
+        0x3408_0082,
+        0x7e02_02ff,
+        width,
+        0x7e04_02ff,
+        bytes - 4,
+        0x7e0a_0280,
+        (0x36 << 26) | (0x0d << 18) | offset,
+        (5 << 8) | 4,
+        0xbf8a0000,
+        0x7e06_02ff,
+        0x55555555,
+        0x360c0000, // v6 = t & s0
+        0x7d880c01, // s1 > v6, elect lane 0
+        if wave64 { 0xbe8c246a } else { 0xbe8c3c6a },
+        0xbf880002,
+        (0x36 << 26) | (0x20 << 18),
+        (3 << 24) | (1 << 8) | 2,
+        if wave64 { 0xbefe040c } else { 0xbefe030c },
+        0x7e0e0503, // v_readfirstlane_b32 s7, v3
+        0x4a060c07, // v3 = base + v6
+        0xbf8a0000,
+        (0x36 << 26) | (0x36 << 18),
+        (5 << 24) | 2,
+        0xe0701000,
+        0x80020304,
+        0x4a0c08ff,
+        4096,
+        0xe0701000,
+        0x80020506,
+    ];
+    let mut native = native_of(&body, wave64, 1024);
+    let StageIo::Cs(ref mut cs) = native.io else {
+        panic!()
+    };
+    cs.rsrc2 |= (bytes / 512) << 15;
+    assert_eq!(cs.lds_bytes(), bytes);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).unwrap();
+    let st = structure::structure(&p).unwrap();
+    let io = io::raise(&p, &native).unwrap();
+    let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+    let c = crate::dxbc::Container {
+        digest: [0; 16],
+        version: (1, 0),
+        parts: vec![],
+    };
+    let sh = super::emit_selected(&c, &native, &p, &st, &io, &res, true).expect("translation");
+    let mut validator = validator::Validator::load(validator::Validator::default_path().as_deref())
+        .expect("validator");
+    validator
+        .validate(&mut sh.dxil.clone())
+        .expect("DXIL validation");
+    for trial in 0..4 {
+        let got = on_the_card_uav(&sh, 32, [width - 1, 1], 2049).expect("hardware required");
+        let w = width as usize;
+        assert!(
+            got[1024..2048].iter().all(|&v| v == 1024),
+            "counter t0={} t1023={}",
+            got[1024],
+            got[2047]
+        );
+        for (i, wave) in got[..1024].chunks_exact(w).enumerate() {
+            assert!(
+                wave[0] < 1024 && wave[0] % width == 0,
+                "wave {i} base {}",
+                wave[0]
+            );
+            for (lane, &ticket) in wave.iter().enumerate() {
+                assert_eq!(ticket, wave[0] + lane as u32, "wave {i} lane {lane}");
+            }
+        }
+        let mut ordered = got[..1024].to_vec();
+        ordered.sort_unstable();
+        assert_eq!(ordered, (0..1024u32).collect::<Vec<_>>());
+        assert_eq!(got[2048], 0);
+        eprintln!("width={width} bytes={bytes} trial={trial} verified=2049");
+    }
+}

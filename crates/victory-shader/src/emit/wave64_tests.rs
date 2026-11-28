@@ -1059,3 +1059,43 @@ fn tile_list_atomic_returns_every_slot_across_both_halves() {
         assert_eq!(out[66], 0, "trailing guard");
     }
 }
+
+/// Write tile IDs into one shared array, from opposite ends. A zero slot means
+/// no lane wrote it. Classify by parity so both host waves contribute to both ends.
+#[test]
+#[ignore = "requires wave32-capable D3D12 hardware"]
+fn tile_lists_from_opposite_ends_keep_every_tile() {
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    for (select_list, front_count) in [
+        (0x3602_0081, 32), // v1 = lane & 1
+        (0x7e02_0280, 64), // v1 = 0
+        (0x7e02_0281, 0),  // v1 = 1
+    ] {
+        let native = native(&[
+            select_list,
+            0x4c06_0280, // v3 = 0 - list
+            0x3606_06bf, // v3 &= 63: invert the slot index for the back list
+            0x3402_0282, // v1 = byte address of counter
+            0x7e04_0281, // v2 = 1
+            0xe0c8_5000, 0x8002_0201, // atomic add returning the previous counter
+            0x3a04_0503, // v2 = slot ^ v3
+            0x3404_0482, // v2 = byte offset of slot
+            0x4a08_0081, // v4 = lane + 1, so every stored ID is nonzero
+            0xe070_100c, 0x8002_0402, // store ID after two counters and a guard
+        ]);
+        let program = ir::build(&native.code, native.wave64, native.vgprs).expect("build IR");
+        let shader = lowered(&native, &program, &HashSet::new()).expect("lower for wave32");
+        let out = on_the_card_uav(&shader, 32, [0, 0], 68).expect("wave32 readback");
+        assert_eq!(&out[..3], &[front_count, 64 - front_count, 0]);
+        assert_eq!(out[67], 0, "trailing guard");
+        let (front, back) = out[3..67].split_at(front_count as usize);
+        let mut ids = [front.to_vec(), back.to_vec()];
+        ids.iter_mut().for_each(|list| list.sort_unstable());
+        let expected: (Vec<_>, Vec<_>) = (1..=64).partition(|id| match front_count {
+            0 => false,
+            64 => true,
+            _ => id % 2 == 1,
+        });
+        assert_eq!(ids, [expected.0, expected.1]);
+    }
+}

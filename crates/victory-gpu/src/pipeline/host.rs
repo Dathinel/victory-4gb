@@ -1490,7 +1490,11 @@ mod tests {
         let replayed = [run_draw(0.6, 1.0, false), run_draw(0.4, 0.6, false)];
         if replayed != [0, 255] {
             let direct = [run_draw(0.6, 1.0, true), run_draw(0.4, 0.6, true)];
-            panic!("depth 0.5 outside/inside: expected [0, 255], replayed {replayed:?}, direct {direct:?}");
+            let adapter = host.adapter_description().map(|d| {
+                let name = String::from_utf16_lossy(&d.Description);
+                format!("{} {:04x}:{:04x} flags={:#x}", name.trim_end_matches('\0'), d.VendorId, d.DeviceId, d.Flags)
+            });
+            panic!("depth 0.5 outside/inside: expected [0, 255], replayed {replayed:?}, direct {direct:?}, adapter={adapter:?}, software={}", host.software_adapter);
         }
     }
 

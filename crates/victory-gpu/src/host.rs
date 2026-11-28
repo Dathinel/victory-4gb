@@ -992,6 +992,12 @@ fn create() -> windows::core::Result<Host> {
 }
 
 impl Host {
+    #[cfg(test)]
+    pub(crate) fn adapter_description(&self) -> Option<DXGI_ADAPTER_DESC1> {
+        // SAFETY: a plain query on the adapter that owns this device.
+        unsafe { self.adapter.as_ref()?.GetDesc1().ok() }
+    }
+
     /// The driver's version, as the system counts it (0: not known).
     pub(crate) fn driver(&self) -> i64 {
         let adapter = self.adapter.as_ref();

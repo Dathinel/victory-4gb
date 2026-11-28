@@ -2510,9 +2510,10 @@ fn slot_evict(video: Option<[u64; 4]>, idle_ms: u64, frames: u64) {
                 KINDS[2].fetch_add(1, Relaxed);
                 KINDS[3].fetch_add(host.bytes, Relaxed);
                 SLOT_EVICT[0].fetch_add(1, Relaxed);
-                SLOT_EVICT[1].fetch_add(host.bytes, Relaxed);
+                let card_bytes = host.card_bytes();
+                SLOT_EVICT[1].fetch_add(card_bytes, Relaxed);
                 n += 1;
-                bytes += host.bytes;
+                bytes += card_bytes;
                 crate::host::retire(host);
             }
             None => {

@@ -465,8 +465,11 @@ fn retranslate(folder: &std::path::Path, into: &std::path::Path, view_limit: u32
         }
     }
     println!("{} containers not found", missing.len());
-    victory_shader::emit::set_host_max_wave(64);
-    victory_shader::emit::set_host_rdna(true);
+    // Preserve the original replay target unless a different host is requested.
+    let wave = std::env::var("VICTORY_HOST_MAX_WAVE").ok().and_then(|v| v.parse().ok());
+    victory_shader::emit::set_host_max_wave(wave.unwrap_or(64));
+    let rdna = std::env::var_os("VICTORY_HOST_RDNA").map_or(wave.is_none(), |v| v == "1");
+    victory_shader::emit::set_host_rdna(rdna);
     victory_shader::emit::set_view_heap_limit(view_limit);
     victory_shader::emit::set_raw_views(raw_views);
     let all: Vec<_> = wanted.iter().collect();
@@ -477,7 +480,9 @@ fn retranslate(folder: &std::path::Path, into: &std::path::Path, view_limit: u32
             s.spawn(|| {
                 while let Some((stage, hash)) = all.get(next.fetch_add(1, Ordering::Relaxed)) {
                     let Ok(bytes) = std::fs::read(kept.join(format!("{hash}.cdxil"))) else { continue };
-                    match victory_shader::emit::translate(&bytes) {
+                    let selected = victory_shader::emit::paired_container_hash()
+                        .is_some_and(|key| blake3::hash(&bytes).as_bytes()[..8] == key);
+                    match victory_shader::emit::translate_selected(&bytes, selected) {
                         Ok(t) => {
                             if std::fs::write(into.join(format!("{hash}.dxil")), &t.dxil).is_ok() {
                                 done.fetch_add(1, Ordering::Relaxed);

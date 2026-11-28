@@ -434,8 +434,27 @@ pub(crate) fn run(r: Replay) -> Result<()> {
 }
 
 /// Translates the capture's shaders into `into`.
+// Captures historically replayed as Wave64 RDNA. An explicit wave width
+// selects a host profile; RDNA can then be requested separately.
+fn replay_host(wave: Option<&std::ffi::OsStr>, rdna: Option<&std::ffi::OsStr>) -> Result<(u32, bool)> {
+    let width = wave.map(|v| v.to_str().and_then(|v| v.trim().parse().ok())
+        .context("VICTORY_HOST_MAX_WAVE must be an unsigned integer")).transpose()?;
+    let rdna = match rdna {
+        None => width.is_none(),
+        Some(v) => match v.to_str().map(str::trim) {
+            Some("0") => false,
+            Some("1") => true,
+            _ => anyhow::bail!("VICTORY_HOST_RDNA must be 0 or 1"),
+        },
+    };
+    Ok((width.unwrap_or(64), rdna))
+}
+
 fn retranslate(folder: &std::path::Path, into: &std::path::Path, view_limit: u32, raw_views: u32) -> Result<()> {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    let wave = std::env::var_os("VICTORY_HOST_MAX_WAVE");
+    let rdna = std::env::var_os("VICTORY_HOST_RDNA");
+    let (wave, rdna) = replay_host(wave.as_deref(), rdna.as_deref())?;
     let wanted = play::title_shaders(folder)?;
     let kept = play::find(folder)?.with_file_name("containers");
     std::fs::create_dir_all(&kept)?;
@@ -465,10 +484,7 @@ fn retranslate(folder: &std::path::Path, into: &std::path::Path, view_limit: u32
         }
     }
     println!("{} containers not found", missing.len());
-    // Preserve the original replay target unless a different host is requested.
-    let wave = std::env::var("VICTORY_HOST_MAX_WAVE").ok().and_then(|v| v.parse().ok());
-    victory_shader::emit::set_host_max_wave(wave.unwrap_or(64));
-    let rdna = std::env::var_os("VICTORY_HOST_RDNA").map_or(wave.is_none(), |v| v == "1");
+    victory_shader::emit::set_host_max_wave(wave);
     victory_shader::emit::set_host_rdna(rdna);
     victory_shader::emit::set_view_heap_limit(view_limit);
     victory_shader::emit::set_raw_views(raw_views);

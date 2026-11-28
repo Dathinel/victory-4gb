@@ -35,12 +35,17 @@ param(
     [int]$TextureBudgetMB,
     # Leaves the water's transmission programs untranslated, as before (dark sea, about 3 % less frame).
     [switch]$NoWaterLight,
-    # The layer's executable; target\diag\victory.exe of this checkout if not given.
+    # The layer's executable; target\release\victory.exe of this checkout if not given, else
+    # target\diag\victory.exe. The release build has no diagnostics counters in it and is the
+    # faster of the two here.
     [string]$Victory,
     # Prints the switches and starts nothing.
     [switch]$Show
 )
-if (-not $Victory) { $Victory = Join-Path $PSScriptRoot '..\target\diag\victory.exe' }
+if (-not $Victory) {
+    $Victory = Join-Path $PSScriptRoot '..\target\release\victory.exe'
+    if (-not (Test-Path $Victory)) { $Victory = Join-Path $PSScriptRoot '..\target\diag\victory.exe' }
+}
 
 $presets = @{
     low    = @{ Texture = '0.25'; Render = '0.5';    Budget = 0 }
@@ -84,7 +89,8 @@ if ($p.Budget -gt 0) { $set.VICTORY_TEXTURE_BUDGET_MB = "$($p.Budget)" }
 # stand-in already replaces.
 $skip = 'rt_off_hashes.txt', 'rt_work_off_hashes.txt' | ForEach-Object { Join-Path $PSScriptRoot $_ } |
     Where-Object { Test-Path $_ } | ForEach-Object { (Get-Content $_ -Raw) -replace '\s', '' }
-if ($skip) { $set.VICTORY_SKIP_PIPELINES = $skip -join ',' }
+# VICTORY_LEAVE_OUT, not VICTORY_SKIP_PIPELINES: the latter exists in diagnostics builds only.
+if ($skip) { $set.VICTORY_LEAVE_OUT = $skip -join ',' }
 
 "quality ${Quality}: textures at $($p.Texture), render scale $($p.Render)" + $(if ($p.Budget) { ", $($p.Budget) MB of textures" })
 if ($Show) {
@@ -94,7 +100,7 @@ if ($Show) {
     }
     return
 }
-if (-not (Test-Path $Victory)) { throw "no ${Victory}: build it first (cargo build --profile diag -p victory --features diagnostics)" }
+if (-not (Test-Path $Victory)) { throw "no ${Victory}: build it first (cargo build --release -p victory)" }
 if (-not (Test-Path $Exe)) { throw "no $Exe" }
 $set.GetEnumerator() | ForEach-Object { Set-Item "env:$($_.Key)" $_.Value }
 & $Victory run $Exe --console series-s --execute

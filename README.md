@@ -17,10 +17,15 @@ On the machine above, branch `coolfox-4gb`:
 - **It plays through.** One 40-minute session with an Xbox controller, from the first scene
   through the first mission and its chase to the boat mission in the open world, with no crash and
   no device loss (median 4.0 fps then, before the gains below).
-- **About 7 fps driving a boat in the open world, 8.7 to 9 standing still** at the start of free
-  play (112 to 115 ms a frame at about 3,500 draws), against 4.1 to 4.9 two days earlier. Most of
-  that came from work that only serves ray tracing, which does not run on this card: a per-pass GPU
-  profile found it and a skip list removes it (issue #4, pull request #37).
+- **About 10 fps standing still at the start of free play** with the release build (96 and 104 ms
+  a frame at about 3,500 draws, two runs; 8.7 to 9 fps with the diagnostics build, which is what
+  every number before 28 November was taken with), against 4.1 to 4.9 two days earlier. Driving a
+  boat was about 7 fps with the diagnostics build and is not measured again yet. Most of the gain
+  came from work that only serves ray tracing, which does not run on this card: a per-pass GPU
+  profile found it and a skip list removes it (issue #4, pull request #37). The rest is the
+  build: the title's recording threads spend over half their time inside the layer, and the
+  diagnostics counters sit in those paths (pull request #42). Build with
+  `cargo build --release -p victory`; the launcher takes that executable if it is there.
 - **The sea has its light.** The three water transmission programs that 32-lane cards refused now
   translate (`VICTORY_WAVE_WIDE=last`, ported from fxceless/victory-fork pull request #1141): the
   sea is a clear turquoise with the light through it instead of a dark grey-blue, for about 3 % of

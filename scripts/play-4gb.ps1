@@ -17,6 +17,9 @@
   (two thirds, FSR4). A full-size render does not exist on this profile: the title stops at its
   own render-target pool check.
 
+  The sea's light (three compute programs that 32-lane cards refuse otherwise) is on by default:
+  about 3 % of the frame on the RTX 3050 Laptop. -NoWaterLight leaves it out.
+
 .EXAMPLE
   scripts\play-4gb.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe'
 .EXAMPLE
@@ -30,6 +33,8 @@ param(
     [ValidateSet('1', '0.5', '0.25')][string]$TextureScale,
     [ValidateSet('0.5', 'native')][string]$RenderScale,
     [int]$TextureBudgetMB,
+    # Leaves the water's transmission programs untranslated, as before (dark sea, about 3 % less frame).
+    [switch]$NoWaterLight,
     # The layer's executable; target\diag\victory.exe of this checkout if not given.
     [string]$Victory,
     # Prints the switches and starts nothing.
@@ -68,6 +73,9 @@ if ($p.Render -eq '0.5') {
     $set.VICTORY_UPSCALER = '6'
     $set.VICTORY_RENDER_SCALE = '0.5'
 }
+# The three water transmission programs (the light through the sea, and underwater) translate on
+# 32-lane cards only with the wave-wide form tried last. Without them the sea is a dark grey-blue.
+if (-not $NoWaterLight) { $set.VICTORY_WAVE_WIDE = 'last' }
 if ($p.Budget -gt 0) { $set.VICTORY_TEXTURE_BUDGET_MB = "$($p.Budget)" }
 # rt_off_hashes.txt: the ray-tracing resolves (trustno1-coder's list). rt_work_off_hashes.txt: work done
 # only for ray tracing, which does not run here: the 41 bvh_skinning programs (about 22 ms of card

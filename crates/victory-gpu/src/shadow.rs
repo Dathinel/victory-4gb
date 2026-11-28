@@ -1491,9 +1491,17 @@ fn spin(there: impl Fn() -> bool) {
     }
 }
 
-/// How many threads are kept for [`wide`].
+/// How many threads are kept for [`wide`]: a quarter of the logical processors, 2 to 6
+/// (`VICTORY_WIDE_THREADS=<n>`, 1 to 32, in its place; the switch is trustno1-coder's, from
+/// its 64d4931b, where the default became three eighths, 2 to 8: not taken here unmeasured).
 fn wide_threads() -> usize {
-    std::thread::available_parallelism().map_or(4, |n| n.get() / 4).clamp(2, 6)
+    static ASKED: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let asked = *ASKED.get_or_init(|| {
+        let n = std::env::var("VICTORY_WIDE_THREADS").ok()?.trim().parse::<usize>().ok()?.clamp(1, 32);
+        tracing::info!(n, "threads kept for refreshes on several threads (VICTORY_WIDE_THREADS)");
+        Some(n)
+    });
+    asked.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get() / 4).clamp(2, 6))
 }
 
 fn workers() -> &'static Workers {

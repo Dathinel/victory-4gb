@@ -1099,3 +1099,35 @@ fn tile_lists_from_opposite_ends_keep_every_tile() {
         assert_eq!(ids, [expected.0, expected.1]);
     }
 }
+
+/// Use synthetic instructions with the two public water program IDs. Exercise
+/// the default translator policy and change one bit as a negative control.
+#[test]
+#[ignore = "requires wave32 hardware and the default wave-wide policy"]
+fn tiled_water_program_ids_select_whole_wave_branches() {
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(std::env::var_os("VICTORY_WAVE_WIDE").is_none());
+    super::set_host_max_wave(32);
+    let native = program(0xbf84_0000);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).unwrap();
+    let st = structure::structure(&p).unwrap();
+    let io = io::raise(&p, &native).unwrap();
+    let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+    for digest in [
+        0x24126c14dc7619b082ef571296038890u128.to_be_bytes(),
+        0x7099a57fded142613b44f410463d6be6u128.to_be_bytes(),
+    ] {
+        let translate = |digest| {
+            let c = crate::dxbc::Container { digest, version: (1, 0), parts: vec![] };
+            super::emit(&c, &native, &p, &st, &io, &res).unwrap()
+        };
+        let recognized = translate(digest);
+        let mut other = digest;
+        other[15] ^= 1;
+        assert_ne!(recognized.dxil, translate(other).dxil, "digest must select a distinct lowering");
+        for (active, expected) in [(0, 0), (32, 65535), (33, 131071), (64, u32::MAX)] {
+            let got = on_the_card_uav(&recognized, 32, [active, 0], 2).expect("wave32 readback");
+            assert_eq!(got, [expected, 0], "active={active}");
+        }
+    }
+}

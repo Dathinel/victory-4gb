@@ -517,6 +517,19 @@ fn retranslate(folder: &std::path::Path, into: &std::path::Path, view_limit: u32
 #[cfg(test)]
 mod tests {
     #[test]
+    fn retranslation_host_settings_preserve_capture_defaults_and_accept_wave32() {
+        use std::ffi::OsStr;
+        use super::replay_host;
+
+        assert_eq!(replay_host(None, None).unwrap(), (64, true));
+        assert_eq!(replay_host(Some(OsStr::new("32 ")), None).unwrap(), (32, false));
+        assert_eq!(replay_host(Some(OsStr::new("32")), Some(OsStr::new(" 1"))).unwrap(), (32, true));
+        assert_eq!(replay_host(None, Some(OsStr::new("0"))).unwrap(), (64, false));
+        assert!(replay_host(Some(OsStr::new("invalid")), None).is_err());
+        assert!(replay_host(None, Some(OsStr::new("invalid"))).is_err());
+    }
+
+    #[test]
     fn ranges() {
         assert_eq!(super::range("3..7"), Some((3, 7)));
         assert_eq!(super::range("5"), Some((5, 5)));

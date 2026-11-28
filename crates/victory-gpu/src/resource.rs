@@ -3053,6 +3053,164 @@ mod tests {
         assert_eq!(t, u64::MAX, "no second subresource");
     }
 
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "manual D3D12 alias-copy comparison; run in a fresh process per mode"]
+    fn alias_copy_after_independent_destination_write() {
+        let host = crate::host::host().expect("D3D12 adapter required");
+        let null = std::ptr::null();
+        let make = |desc: ResourceDesc| {
+            let mut object = null;
+            assert_eq!(
+                create_committed(
+                    null,
+                    &PROPERTIES,
+                    0,
+                    &desc,
+                    0,
+                    null.cast(),
+                    &RESOURCE_IIDS[0],
+                    &mut object
+                ),
+                S_OK
+            );
+            object
+        };
+        let source = make(ResourceDesc {
+            flags: 1,
+            ..texture(4, 4, 42, 1)
+        });
+        let address = resource(source).data() as u64;
+        let desc = [3, 0, 0, 0, 4, 0, 4, 0x1_0001, 67, 1, 0, 0, 0, 0];
+        let view = texture_at(address, &desc).expect("placed view");
+        assert_eq!(alias_of(view), Some(source));
+        let upload = make(buffer(2048));
+        let readback = host.read_back_buffer(1024).unwrap();
+        let (input, _) = buffer_bytes(upload).unwrap();
+        // SAFETY: the two byte patterns occupy the two halves of this committed buffer.
+        unsafe {
+            input.write_bytes(0x11, 1024);
+            input.add(1024).write_bytes(0x77, 1024);
+        }
+        #[repr(C)]
+        struct Location {
+            resource: This,
+            kind: u32,
+            footprint: PlacedFootprint,
+        }
+        type Copy =
+            extern "system" fn(This, *const Location, u32, u32, u32, *const Location, *const u8);
+        let location = |resource, kind, offset, format| Location {
+            resource,
+            kind,
+            footprint: PlacedFootprint {
+                offset,
+                format,
+                width: 4,
+                height: 4,
+                depth: 1,
+                row_pitch: 256,
+            },
+        };
+        let submit = |record: &dyn Fn(This)| {
+            let (mut allocator, mut list) = (null, null);
+            let iid = &PAGEABLE_IIDS[1];
+            assert_eq!(
+                crate::list::create_allocator(null, 0, iid, &mut allocator),
+                S_OK
+            );
+            assert_eq!(
+                crate::list::create_list(null, 0, 0, allocator, null, iid, &mut list),
+                S_OK
+            );
+            record(list);
+            assert_eq!(
+                slot::<extern "system" fn(This) -> HRESULT>(list, 0x48)(list),
+                S_OK
+            );
+            host.execute(&[crate::list::host_list(list).unwrap()]);
+            for object in [list, allocator] {
+                slot::<extern "system" fn(This) -> u32>(object, 0x10)(object);
+            }
+        };
+        let write = |object, offset, format| {
+            submit(&|list| {
+                slot::<Copy>(list, 0x80)(
+                    list,
+                    &location(object, 0, 0, format),
+                    0,
+                    0,
+                    0,
+                    &location(upload, 1, offset, format),
+                    null.cast(),
+                );
+            })
+        };
+        let read_image = |image, format, refresh: bool| {
+            submit(&|list| {
+                let host_list = crate::list::host_list(list).unwrap();
+                if refresh {
+                    assert!(crate::texture::alias(
+                        host_list,
+                        view,
+                        alias_of(view).unwrap()
+                    ));
+                }
+                use windows::core::Interface;
+                crate::list::ensure_state(host_list, image, 0x800);
+                let from = location(
+                    host_resource(image).unwrap().as_raw().cast_const().cast(),
+                    0,
+                    0,
+                    format,
+                );
+                let to = location(readback.as_raw().cast_const().cast(), 1, 0, format);
+                // SAFETY: both resources and their locations survive the synchronous submission.
+                unsafe {
+                    host_list.list.CopyTextureRegion(
+                        (&raw const to).cast(),
+                        0,
+                        0,
+                        0,
+                        (&raw const from).cast(),
+                        None,
+                    );
+                }
+            });
+            let mut data = std::ptr::null_mut();
+            unsafe {
+                readback.Map(0, None, Some(&mut data)).unwrap();
+            }
+            // SAFETY: synchronous submission completed; four rows fit in the 1024-byte buffer.
+            let rows = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), 1024) };
+            let mut pixels = Vec::new();
+            for row in rows.chunks_exact(256) {
+                pixels.extend_from_slice(&row[..16]);
+            }
+            unsafe {
+                readback.Unmap(0, None);
+            }
+            pixels
+        };
+        write(source, 0, 42);
+        assert_eq!(read_image(source, 42, false), [0x11; 64], "source upload");
+        assert_eq!(read_image(view, 67, true), [0x11; 64], "first copy");
+        assert_eq!(read_image(view, 67, true), [0x11; 64], "unchanged source");
+        write(view, 1024, 67);
+        assert_eq!(
+            read_image(view, 67, false),
+            [0x77; 64],
+            "explicit copy reached destination"
+        );
+        let after_destination_write = read_image(view, 67, true);
+        write(source, 1024, 42);
+        assert_eq!(read_image(view, 67, true), [0x77; 64], "updated source");
+        assert_eq!(
+            after_destination_write, [0x11; 64],
+            "equivalence to an unconditional alias copy"
+        );
+    }
+
     /// A 4x4 texture filled from a title buffer through our list and queue,
     /// then read back from the host GPU.
     #[cfg(windows)]

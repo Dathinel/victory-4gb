@@ -143,7 +143,8 @@ at a time and does not show where the time of a normal run goes.
 - **Run-to-run variance.** Whether the player character is lit differs between identical runs (also
   reported on an RTX 5070 Ti in fork pull request #799). One run proves little; the numbers above
   are from one run each unless said.
-- Hair is dithered (it wants the temporal resolve); two 64-lane compute programs are still refused.
+- Hair is dithered (it wants the temporal resolve); two 64-lane compute programs are still refused
+  (`02384a60fda6f2d0`, `6b82bc7d22016cb5`; the three of the water translate since pull request #39).
 
 ## Build and run
 
@@ -198,6 +199,18 @@ matters. Same boat scene, one run each, against 4.4 to 4.5 fps (140 to 147 ms on
 - The loose-LDS fallback of fork pull request #799 builds 4 of the 6 compute programs this card
   refuses; the picture washed out in two runs with all four built, and not in either half.
 - Another project's 25 fps claim on a 16 GB card is 2.4 fps here (`coolfox-4gb`).
+- 28 November, `coolfox-4gb`, the boat standing still (about 3,500 draws, 111.5 to 112 ms a frame
+  without any of these; pull request #38 has the runs):
+  - CPU-side ports (`VICTORY_WC_NO_BACK`, `VICTORY_FAULT_UNLOCKED`, `VICTORY_GUARD_HOT`,
+    `VICTORY_SYNC_IN_PLACE`, `VICTORY_SPANS_QUICK`, `VICTORY_SYNC_FINE`): 8 ms a frame less copying
+    back, the frame the same (112.3 ms).
+  - Windows of title memory on the card with fewer textures (`VICTORY_CARD_WINDOWS_MB=1024
+    VICTORY_TEXTURE_BUDGET_MB=300`): 114.7 ms.
+  - `VICTORY_RENDER_SCALE=0.4`: slower, 126.3 ms, the card 95 % busy.
+  - Skipping the whole `sr_tracing` family (40 programs): 2 ms less, and black blocks over the sea.
+  - No single pass is left to skip: the card's 76.5 ms a frame are spread over 1,068 kinds of
+    command, the largest 3.1 ms. The "alias copy" that read 11.5 ms in an earlier profile is 2.6 ms
+    (its timing interval was not closed).
 
 ## Contributing
 

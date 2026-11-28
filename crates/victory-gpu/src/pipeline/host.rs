@@ -868,6 +868,25 @@ fn stream_pipeline<S>(
     )
 }
 
+/// WARP requires depth reads for a bounds-only pipeline. ALWAYS with zero writes
+/// keeps the ordinary depth comparison inert while letting the bounds test read.
+fn bounds_stream_state<'a>(
+    device: &ID3D12Device,
+    format: DXGI_FORMAT,
+    mut depth: D3D12_DEPTH_STENCIL_DESC1,
+    name: &'a str,
+) -> (D3D12_DEPTH_STENCIL_DESC1, std::borrow::Cow<'a, str>) {
+    if !depth.DepthEnable.as_bool() && depth.DepthBoundsTestEnable.as_bool()
+        && format != DXGI_FORMAT_UNKNOWN && host().is_some_and(|h| h.software_adapter && &h.device == device)
+    {
+        depth.DepthEnable = true.into();
+        depth.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        depth.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        return (depth, format!("{name}-warp-bounds-read").into());
+    }
+    (depth, name.into())
+}
+
 /// A graphics pipeline enabling the depth bounds test: `D3D12_GRAPHICS_PIPELINE_STATE_DESC`
 /// has no field for `DepthBoundsTestEnable`, so it is created and loaded as a
 /// pipeline-state stream with `DEPTH_STENCIL1`.
@@ -904,6 +923,7 @@ fn graphics_depth_bounds_pipeline(
         RTFormats: d.RTVFormats,
         NumRenderTargets: d.NumRenderTargets,
     };
+    let (depth, name) = bounds_stream_state(device, d.DSVFormat, depth, name);
     let base = Stream {
         root: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, root.as_raw()),
         vs: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS, d.VS),
@@ -921,13 +941,13 @@ fn graphics_depth_bounds_pipeline(
     };
     if d.GS.pShaderBytecode.is_null() {
         let mut stream = base;
-        stream_pipeline(device, &mut stream, name)
+        stream_pipeline(device, &mut stream, &name)
     } else {
         let mut stream = StreamGs {
             base,
             gs: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS, d.GS),
         };
-        stream_pipeline(device, &mut stream, name)
+        stream_pipeline(device, &mut stream, &name)
     }
 }
 
@@ -986,6 +1006,7 @@ fn mesh_pipeline(
         stream_pipeline(device, &mut stream, name)
     };
     if depth_bounds {
+        let (depth, name) = bounds_stream_state(device, g.depth_format, g.depth1(), name);
         let mut stream = Stream {
             root: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, root.as_raw()),
             ms: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS, ms),
@@ -993,7 +1014,7 @@ fn mesh_pipeline(
             blend: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, host_blend(&g.blend, &g.targets)),
             mask: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, g.sample_mask),
             raster: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, g.rasterizer),
-            depth: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1, g.depth1()),
+            depth: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1, depth),
             targets: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS, g.targets),
             dsv: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT, g.depth_format),
             samples: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC, g.samples),
@@ -1002,7 +1023,7 @@ fn mesh_pipeline(
                 D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
             ),
         };
-        stream_pipeline(device, &mut stream, name)
+        stream_pipeline(device, &mut stream, &name)
     } else {
         build(Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL, g.depth))
     }
@@ -1216,6 +1237,8 @@ mod tests {
     /// `OMSetDepthBounds` (including across a command-list cut).
     #[test]
     fn depth_bounds_pipeline_loads_and_filters_draws() {
+        use windows::core::Interface;
+
         let Some(host) = host() else {
             return;
         };
@@ -1378,14 +1401,16 @@ mod tests {
             out.unwrap()
         };
 
-        let run_draw = |min: f32, max: f32| -> u8 {
+        let run_draw = |min: f32, max: f32, direct: bool| -> u8 {
             let mut state = crate::draw::State::default();
             let first_list = host.new_list().unwrap();
             state.set_depth_bounds(&first_list, min, max);
             first_list.close();
             // Replay onto a second host list, exercising `State::replay`.
             let list = host.new_list().unwrap();
-            state.replay(&list);
+            if !direct {
+                state.replay(&list);
+            }
             let rtv = host.rtv(Some(&color), None);
             let dsv = host.dsv(&depth, None);
             let vp = D3D12_VIEWPORT {
@@ -1411,6 +1436,9 @@ mod tests {
                 list.list.RSSetScissorRects(&[rect]);
                 list.list.SetGraphicsRootSignature(&root);
                 list.list.SetPipelineState(&pso);
+                if direct {
+                    list.list.cast::<ID3D12GraphicsCommandList1>().unwrap().OMSetDepthBounds(min, max);
+                }
                 list.list
                     .IASetPrimitiveTopology(windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                 list.list.DrawInstanced(3, 1, 0, 0);
@@ -1459,8 +1487,15 @@ mod tests {
             }
         };
 
-        assert_eq!(run_draw(0.6, 1.0), 0, "depth 0.5 outside [0.6, 1.0] must be rejected");
-        assert_eq!(run_draw(0.4, 0.6), 255, "depth 0.5 inside [0.4, 0.6] must pass");
+        let replayed = [run_draw(0.6, 1.0, false), run_draw(0.4, 0.6, false)];
+        if replayed != [0, 255] {
+            let direct = [run_draw(0.6, 1.0, true), run_draw(0.4, 0.6, true)];
+            let adapter = host.adapter_description().map(|d| {
+                let name = String::from_utf16_lossy(&d.Description);
+                format!("{} {:04x}:{:04x} flags={:#x}", name.trim_end_matches('\0'), d.VendorId, d.DeviceId, d.Flags)
+            });
+            panic!("depth 0.5 outside/inside: expected [0, 255], replayed {replayed:?}, direct {direct:?}, adapter={adapter:?}, software={}", host.software_adapter);
+        }
     }
 
     fn element(format: DXGI_FORMAT, offset: u32) -> D3D12_INPUT_ELEMENT_DESC {

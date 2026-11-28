@@ -61,7 +61,7 @@ fn book() -> Option<&'static Mutex<Book>> {
         let mut keys = HashSet::new();
         let mut shaders = HashSet::new();
         let ends = [
-            walk_shaders(&dir, |_, hash, _, _| drop(shaders.insert(hash))),
+            walk_shaders(&dir, |_, hash, _, _| { shaders.insert(hash); }),
             walk_pipelines(&dir, |_, bytes| {
                 keys.extend(bytes.first_chunk::<16>().copied());
             }),
@@ -204,6 +204,9 @@ pub fn fingerprint() -> String {
     h.update(&crate::shader_cache::translation());
     if let Some(host) = crate::host::host() {
         h.update(&host.driver().to_le_bytes());
+        if host.software_adapter {
+            h.update(b"warp-bounds-read-v1");
+        }
     }
     h.finalize().to_hex()[..16].to_owned()
 }
@@ -220,7 +223,7 @@ pub fn use_translations(dir: PathBuf) {
 /// there is one.
 pub fn make(dir: &Path, which: &[usize], mut each: impl FnMut(usize, Option<(f64, bool)>)) {
     let mut places = HashMap::new();
-    walk_shaders(dir, |stage, hash, at, len| drop(places.insert(hash, (stage, at, len))));
+    walk_shaders(dir, |stage, hash, at, len| { places.insert(hash, (stage, at, len)); });
     let Ok(mut file) = std::fs::File::open(dir.join(SHADERS)) else { return };
     let wanted: HashSet<usize> = which.iter().copied().collect();
     let mut entries = HashMap::new();

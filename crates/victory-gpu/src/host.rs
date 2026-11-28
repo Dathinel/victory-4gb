@@ -57,6 +57,7 @@ pub(crate) struct Host {
     /// The adapter the device is on, for its memory budget
     /// ([`Host::video_memory`]); `None` if the system does not name it.
     adapter: Option<IDXGIAdapter3>,
+    pub(crate) software_adapter: bool,
     /// 1-descriptor shader-visible fallback heaps bound when a command list
     /// omits a view or sampler heap while using directly-indexed root signatures.
     fallback_view: OnceLock<Option<ID3D12DescriptorHeap>>,
@@ -981,6 +982,14 @@ fn create() -> windows::core::Result<Host> {
             messages,
             next_rtv: AtomicU32::new(0),
             presenter: Mutex::new(None),
+            // The Microsoft Basic Render Driver on hosted Windows can report Flags == 0.
+            software_adapter: adapter
+                .as_ref()
+                .and_then(|a| a.GetDesc1().ok())
+                .is_some_and(|d| {
+                    d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0
+                        || (d.VendorId, d.DeviceId) == (0x1414, 0x008c)
+                }),
             adapter,
             fallback_view: OnceLock::new(),
             fallback_sampler: OnceLock::new(),
@@ -989,6 +998,12 @@ fn create() -> windows::core::Result<Host> {
 }
 
 impl Host {
+    #[cfg(test)]
+    pub(crate) fn adapter_description(&self) -> Option<DXGI_ADAPTER_DESC1> {
+        // SAFETY: a plain query on the adapter that owns this device.
+        unsafe { self.adapter.as_ref()?.GetDesc1().ok() }
+    }
+
     /// The driver's version, as the system counts it (0: not known).
     pub(crate) fn driver(&self) -> i64 {
         let adapter = self.adapter.as_ref();
@@ -2755,6 +2770,7 @@ struct Flight {
 }
 
 /// One thing in the line of what waits for the card, in order.
+#[expect(clippy::large_enum_variant, reason = "keep queued flights inline to avoid a separate allocation per submission")]
 enum Late {
     Run(Flight),
     /// A bottom-of-pipe write of the flight before it: address, what, bytes.
@@ -2981,7 +2997,7 @@ fn blame_stale(stale: &[(std::sync::Arc<crate::shadow::Shadow>, usize, usize)]) 
 /// title memory read, took `us`.
 #[cfg(feature = "diagnostics")]
 fn blamed(why: usize, us: u64) {
-    let (named, refused) = std::mem::replace(&mut *BLAMED.lock().unwrap_or_else(|e| e.into_inner()), (None, ""));
+    let (named, refused) = std::mem::take(&mut *BLAMED.lock().unwrap_or_else(|e| e.into_inner()));
     let (key, at) = match (why, named) {
         (WHY_READ | WHY_STALE, Some(named)) => named,
         (WHY_READ, None) => (("a host copy of what a copy done on the card wrote", refused, 0, 0, 0), 0),
@@ -3782,6 +3798,7 @@ fn late_line(frames: f64) {
 pub(crate) mod aside;
 pub(crate) mod awake;
 mod card_steps;
+#[cfg(any(test, feature = "diagnostics"))]
 pub(crate) mod indirects;
 #[cfg(feature = "diagnostics")]
 mod panel;
@@ -7903,7 +7920,9 @@ fn front_spans(steps: impl Iterator<Item = Touch>) -> Vec<(usize, usize, usize)>
                 given[i] = part;
             }
             Touch::Part => part += 1,
-            Touch::Title | Touch::Nothing => {}
+            #[cfg(test)]
+            Touch::Title => {}
+            Touch::Nothing => {}
         }
     }
     spans.retain(|s| s.1 < s.2);
@@ -7916,7 +7935,8 @@ enum Touch {
     Refresh(usize, usize, usize),
     /// The copy is given to shaders.
     Write(usize),
-    /// Title memory is written.
+    /// The production iterator stops at a title write before emitting a step.
+    #[cfg(test)]
     Title,
     Nothing,
     /// Another part of the submission begins.
@@ -7942,6 +7962,7 @@ fn written_spans(steps: impl Iterator<Item = Touch>) -> Vec<(usize, usize, usize
                     span.2 = true;
                 }
             }
+            #[cfg(test)]
             Touch::Title => break,
             Touch::Nothing | Touch::Part => {}
         }

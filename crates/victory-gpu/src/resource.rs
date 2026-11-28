@@ -101,7 +101,7 @@ pub(crate) struct ResourceDesc {
 #[cfg(windows)]
 impl ResourceDesc {
     /// The texture of this one's levels from `base` on.
-    fn from_level(&self, base: u32) -> ResourceDesc {
+    fn starting_at_level(&self, base: u32) -> ResourceDesc {
         let mut d = *self;
         if base > 0 {
             d.width = (d.width >> base).max(1);
@@ -1527,7 +1527,7 @@ fn fills(desc: &ResourceDesc) -> bool {
 /// on their shorter side, whose sides the levels left out halve exactly
 /// into whole 4-texel blocks: host level `m` is then title level `m + N`
 /// texel for texel. Shaders see the texture at half the size per level
-/// left out: views shift their levels ([`shift_levels`]), and copies
+/// left out: views shift their levels, and copies
 /// between such a texture and another are skipped (`list.rs` `unlike`).
 ///
 /// `VICTORY_TEXTURE_KEEP_SIDE=<texels>`: no texture is taken below that
@@ -1556,7 +1556,7 @@ pub(crate) fn drop_levels(desc: &ResourceDesc) -> u32 {
     });
     let (w, h) = (desc.width, u64::from(desc.height));
     let n = levels_above(n.min(u32::from(desc.mip_levels).saturating_sub(1)), w.max(h), keep);
-    let whole = |side: u64| side % (4 << n) == 0;
+    let whole = |side: u64| side.is_multiple_of(4 << n);
     if n == 0 || w.min(h) < 512 || !whole(w) || !whole(h) {
         return 0;
     }
@@ -1633,6 +1633,7 @@ pub(crate) fn readback_subresource(this: This, index: u32) -> Result<u32, &'stat
 /// (`first`, `levels`, `clamp`) on a host texture that leaves out `drop`
 /// title levels: the same texels where they are there, else the host's
 /// largest level. A level count of `u32::MAX` (all of them) stays.
+#[cfg(test)]
 pub(crate) fn shift_levels(drop: u32, first: &mut u32, levels: &mut u32, clamp: &mut f32) {
     if drop == 0 {
         return;
@@ -1739,7 +1740,7 @@ fn hosted(this: This, make: bool) -> Option<Made> {
         }
         let texture = match texture {
             Some(texture) => Some(texture),
-            None => host_texture(&r.desc.from_level(base), r.host.state, clear),
+            None => host_texture(&r.desc.starting_at_level(base), r.host.state, clear),
         };
         let Some(texture) = texture else {
             r.host.refused.store(true, Relaxed);
@@ -2685,7 +2686,7 @@ fn host_texture_as(
         }
     };
     if let Err(e) = &made {
-        crate::residency::allocation_error(&e);
+        crate::residency::allocation_error(e);
         tracing::warn!(error = %e, desc = ?d, reserved, "no host texture");
     }
     if !reserved
@@ -3106,6 +3107,7 @@ static PLACED_TWINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 
 /// See [`PLACED_TWINS`].
 #[cfg(windows)]
+#[cfg(feature = "diagnostics")]
 pub(crate) fn placed_filler_twins() -> u64 {
     PLACED_TWINS.load(std::sync::atomic::Ordering::Relaxed)
 }

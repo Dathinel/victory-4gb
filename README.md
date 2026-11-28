@@ -10,33 +10,49 @@ video memory and measured there:
 **This repository contains no game files, code or assets.** You need your own copy of the game. It is
 not affiliated with or endorsed by the game's developer or publisher.
 
-## Where it stands (27 November 2026)
+## Where it stands (28 November 2026)
 
 On the machine above, branch `coolfox-4gb`:
 
 - **It plays through.** One 40-minute session with an Xbox controller, from the first scene
   through the first mission and its chase to the boat mission in the open world, with no crash and
   no device loss (median 4.0 fps then, before the gains below).
-- **6.5 to 7 fps in open-world free play** now (5.9 to 7.3 over three runs; 150 ms a frame), against
-  4.1 to 4.9 a day earlier. Two thirds of the card's time went to work that only serves ray
-  tracing, which does not run on this card; a per-pass GPU profile found it and a skip list removes
-  it (issue #4).
+- **About 7 fps driving a boat in the open world, 8.7 to 9 standing still** at the start of free
+  play (112 to 115 ms a frame at about 3,500 draws), against 4.1 to 4.9 two days earlier. Most of
+  that came from work that only serves ray tracing, which does not run on this card: a per-pass GPU
+  profile found it and a skip list removes it (issue #4, pull request #37).
+- **The sea has its light.** The three water transmission programs that 32-lane cards refused now
+  translate (`VICTORY_WAVE_WIDE=last`, ported from fxceless/victory-fork pull request #1141): the
+  sea is a clear turquoise with the light through it instead of a dark grey-blue, for about 3 % of
+  the frame. The launcher sets it; `-NoWaterLight` leaves it out (pull request #39).
 - **Characters, clothes and props are there**: on a 4 GB card the tree admitted about 5,500
   textures and then no more; at a quarter of their size about 10,000 fit in the same memory
   (issue #3).
 - **The fog veil over interiors is gone** in three runs of three (issue #2, pull request #15).
 
 To start it with all of that: `scripts\play-4gb.ps1 -Exe <your game executable>` on `coolfox-4gb`
-(`-Quality low|medium|high`, `-TextureScale 1|0.5|0.25`, `-Show` to see what it would set).
+(`-Quality low|medium|high`, `-TextureScale 1|0.5|0.25`, `-NoWaterLight`, `-Show` to see what it
+would set).
+
+How the numbers are taken now: two runs driving the same route end in different places (3,700 to
+5,100 draws a frame) and differ by more than most changes do, so a change is compared with the boat
+standing still at the start of free play, which repeats within about 1 ms a frame. A batch of CPU-side
+ports that looked like 8.0 against 7.2 fps driving measured 112.3 against 112.0 ms that way: no gain
+(pull request #38).
 
 **Not good yet**
 
-- Speed: the CPU side of a frame (65 ms preparing, 26 ms copying back) is the limit now.
+- Speed: the card is the limit. It works about 77 ms of a 112 ms frame, spread over more than a
+  thousand kinds of small commands (no pass over 3 ms); cutting 10 ms of CPU time did not shorten
+  the frame. The card's memory is about a tenth over its budget and the game holds 15.6 of the
+  PC's 24 GB.
 - The first scene while it loads: full-white captures and untextured stand-in characters in some
   runs. Fast cuts in cutscenes outrun the texture upload.
-- Water differs between identical runs: waves, a flat mirror, or white all over (issue #21).
+- Water differed between identical runs before the change above: waves, a flat mirror, or white
+  all over (issue #21). Not looked at again since; underwater is not checked.
 - Interiors and night are clean but dark: indirect light is still missing.
-- Five compute programs do not translate for 32-lane waves (three of them water volumetrics).
+- Two compute programs still do not translate for 32-lane waves (`02384a60fda6f2d0`,
+  `6b82bc7d22016cb5`).
 
 It is not finished, and pull requests are what would move it fastest: see
 [Contributing](#contributing). If you have a 4 to 8 GB card, a run of yours with the numbers the
@@ -47,7 +63,7 @@ log prints is a contribution: the form is under Issues.
 | Branch | What it is | In the first gameplay scene, on this card | Picture |
 |---|---|---|---|
 | `main` | [fxceless/victory-fork](https://github.com/fxceless/victory-fork) `main` + pull requests and ports listed below | **5.4 to 6.7 fps** (145 to 185 ms a frame at about 4,400 draws) | clothes lit by the added ambient light, window glass right; skin and rooms still too dark |
-| `coolfox-4gb` | codec-d's `cool_fox` at `f4b48ad` (the leading public build on PortWatch until it was taken down) + the render-scale port | **6.5 to 7 fps** in open-world free play (150 ms a frame) with the set below, 5.2 to 5.5 in the first room before the last gains; 2.4 to 2.5 fps (400 to 418 ms) with its own NVIDIA launcher's set | the best here: face, neck, hair, clothes and walls lit; with the ray-tracing passes skipped the room is lit warm and the haze is gone (one run); daylight outdoors right |
+| `coolfox-4gb` | codec-d's `cool_fox` at `f4b48ad` (the leading public build on PortWatch until it was taken down) + the render-scale port | **about 7 fps** driving in open-world free play, 8.7 to 9 standing still (112 to 115 ms a frame), with the launcher's set, 5.2 to 5.5 in the first room before the last gains; 2.4 to 2.5 fps (400 to 418 ms) with its own NVIDIA launcher's set | the best here: face, neck, hair, clothes and walls lit; with the ray-tracing passes skipped the room is lit warm and the haze is gone (one run); daylight outdoors right |
 
 The two are not merged. A trial merge stops on 39 files and about 300 hunks, most of them in
 `crates/victory-gpu/src` (`host.rs` 91, `draw.rs` 39, `indirect.rs` 30, `descriptor/host.rs` 26,

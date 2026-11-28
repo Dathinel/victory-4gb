@@ -22,7 +22,17 @@ fn on_the_card_uav(
     constants: [u32; 2],
     uav_dwords: u32,
 ) -> Option<Vec<u32>> {
-    let Ok(host) = Host::new(false) else {
+    on_adapter_uav(shader, width, constants, uav_dwords, false)
+}
+
+fn on_adapter_uav(
+    shader: &HostShader,
+    width: u32,
+    constants: [u32; 2],
+    uav_dwords: u32,
+    warp: bool,
+) -> Option<Vec<u32>> {
+    let Ok(host) = Host::new(warp) else {
         eprintln!("No hardware device; skipped GPU readback");
         return None;
     };
@@ -1093,7 +1103,9 @@ fn meshlet_1024_lds() {
         .validate(&mut sh.dxil.clone())
         .expect("DXIL validation");
     for trial in 0..4 {
-        let got = on_the_card_uav(&sh, 32, [width - 1, 1], 2049).expect("hardware required");
+        let warp = std::env::var("VICTORY_WARP").as_deref() == Ok("1");
+        let got = on_adapter_uav(&sh, 32, [width - 1, 1], 2049, warp).expect("Wave32 adapter required");
+        eprintln!("WARP requested: {warp}");
         let w = width as usize;
         assert!(
             got[1024..2048].iter().all(|&v| v == 1024),

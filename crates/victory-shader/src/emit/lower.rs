@@ -2876,10 +2876,6 @@ impl<'a> Lower<'a> {
                 self.swap_lanes();
                 self.partial_active = Some(lanes[1]);
                 self.swap_lanes();
-            } else if self.halves.is_some() || self.exchange.is_some() {
-                // A console wave in two host waves exchanges through group
-                // barriers, which every thread must reach: the threads stay.
-                self.partial_active = Some(runs);
             } else {
                 let (body, done) = (self.s.m.new_block(), self.s.m.new_block());
                 self.s.m.terminate(original, Term::CondBr(runs, body, done));
